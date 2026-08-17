@@ -140,6 +140,19 @@ def main():
     check('年中折现t=0.5..4.5', all(isinstance(v, (int, float)) and abs(v - (0.5 + i)) < 1e-9
                                   for i, v in enumerate(tidx)), str(tidx))
 
+    if addr.get('fcfe_ps'):
+        print('\n[FCFE 双视图]')
+        fps = V('FCFE', addr['fcfe_ps'].split('!')[1])
+        feq = V('FCFE', addr['fcfe_eq'].split('!')[1])
+        fdiff = V('FCFE', addr['fcfe_diff'].split('!')[1])
+        print(f'  FCFE股权价值={fmt(feq)}  FCFE每股={fps:.4f}元  vs FCFF {ps:.4f}元 ({fdiff:+.1%})')
+        check('FCFE每股>0', fps > 0, f'{fps:.2f}元')
+        if abs(fdiff) >= 0.30:
+            print(f'  [INFO] 两法偏差{fdiff:+.1%}较大: 多见于融资计划大幅去杠杆的标的(FCFE含净新增借款), '
+                  '机制性差异说明见FCFE页底部注记')
+    if addr.get('named_ranges'):
+        print(f"  named ranges: {len(addr['named_ranges'])}个 ({', '.join(list(addr['named_ranges'])[:6])}...)")
+
     print('\n[三情景]')
     for k in ['bear', 'base', 'bull']:
         p = V('Scenarios', addr[f'scen_{k}_ps'].split('!')[1])

@@ -1,23 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-A股机构级估值模型生成器 (通用版, 由胜宏科技300476定制脚本产品化而来)
+A股机构级估值模型生成器 (通用版)
 
 用法:
     python build_model.py --code 300476                 # 读 configs/300476.yaml, 生成 out/*.xlsx
     python build_model.py --config configs/300476.yaml  # 指定配置文件
     python build_model.py --code 002463 --out examples/002463.xlsx
 
+研究层 (全部默认关闭, 不传任何研究参数时输出与基础模型完全一致):
+    --dr <档案.md>        导入深度研究档案: 量化结论回填Assumptions依据列(标注dr档案§章节),
+                          新增 DR研究(全文存档) 与 研究摘要(假设×采用值×来源×置信度) 两页
+    --consensus <json/csv> 聚源/gildata一致预期文件(营收/归母/目标价), 写入研究摘要并
+                          用于Relative_Val与Checks的一致性对照行
+    --announcements       东财业绩预告/业绩快报(系统curl)抓最新一期要点进研究摘要
+    --llm auto|claude|codex|off  本机存在对应CLI时生成研究备忘录写入研究摘要页眉 (默认off)
+
 配置驱动: 个股差异全部收敛到 YAML 配置 (公司信息/分部业务量价假设/费用率/税率/营运资本/
 资本开支/股利/债务融资/可比公司/WACC/三情景), 每个假设均带"依据"文字字段 (硬性要求)。
 配置缺失或缺 segments 时自动走兜底模式: 经 fetch_data 用东财F10(系统curl)拉取三表+
 主营构成, 自动推导单段/少段收入驱动与费率默认值, 模型照样跑通 (精度局限见README)。
 
-模型结构 (16 sheets):
+模型结构 (17 sheets, 研究层激活时追加 DR研究/研究摘要):
     Cover / Summary / Assumptions / Revenue_Segments / IS / BS / CF / Schedules /
-    PPE / FIN / Equity_Roll / DCF / Relative_Val / Sensitivity / Scenarios / Checks
+    PPE / FIN / Equity_Roll / DCF / FCFE / Relative_Val / Sensitivity / Scenarios / Checks
 特性: FIN页revolver+现金sweep+理财承接, 利息=平均余额×利率的循环链在FIN页表内
 迭代展开4轮(全簿无循环引用, LibreOffice headless可直接重算); WACC可比unlever/relever;
-DCF年中折现; Checks页自动校验。
+DCF年中折现; FCFE股权现金流双视图; 关键驱动named range审计轨迹; Checks页自动校验。
 
 单位: 人民币百万元(除标注外); 输入蓝/公式黑/外链绿/警告红。
 """
@@ -187,7 +195,7 @@ def sec(ws, r, text, ncols=10):
 # 主构建流程
 # ============================================================
 
-def build(cfg, out_path, addr_path):
+def build(cfg, out_path, addr_path, research=None):
     co = cfg.raw['company']
     NAME, CODE_FULL = co['name'], co['code_full']
     HIST = [int(y) for y in cfg.get('model.hist_years')]
@@ -230,6 +238,20 @@ def build(cfg, out_path, addr_path):
 
     A = {}   # key -> row
 
+    # dr档案量化结论 → 依据列回填 (研究层, 默认关闭; 仅追加标注, 不改动任何假设值)
+    _dr_findings = ((research or {}).get('dr') or {}).get('findings') or []
+    if _dr_findings:
+        from research.dr_report import annotate as _dr_annotate
+
+        def _ann(label, basis):
+            hits = _dr_annotate(_dr_findings, label)
+            if not hits:
+                return basis
+            return (basis + ' | ' if basis else '') + ' | '.join(hits)
+    else:
+        def _ann(label, basis):
+            return basis
+
     def arow(r, label, unit, vals, basis, kind='in', fmt=PCT):
         """写入一行假设: vals 为标量或NF元列表"""
         put(ws, r, 1, label, 't')
@@ -239,7 +261,7 @@ def build(cfg, out_path, addr_path):
                 put(ws, r, 3 + i, v, kind, fmt)
         else:
             put(ws, r, 3, vals, kind, fmt)
-        put(ws, r, 8, basis, 'g', size=9, wrap=True)
+        put(ws, r, 8, _ann(label, basis), 'g', size=9, wrap=True)
         return r
 
     def arow_e(r, label, unit, entry, kind='in', fmt=PCT, n=NF):
@@ -1520,6 +1542,72 @@ def build(cfg, out_path, addr_path):
     DCFs = 'DCF'
 
     # ============================================================
+    # FCFE (股权自由现金流, Ke折现, 与FCFF双视图对照)
+    # ============================================================
+    ws = wb.create_sheet('FCFE')
+    title_bar(ws, f'{NAME} — FCFE 股权自由现金流估值 (Ke折现, 与FCFF双视图)',
+              f'单位: 人民币百万元 | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), 直接得股权价值, 无需EV→Equity桥')
+    ws.column_dimensions['A'].width = 32
+    for y in YRS:
+        ws.column_dimensions[YC[y]].width = 11
+    ws.column_dimensions['J'].width = 60
+    put(ws, 3, 1, '项目', 't', bold=True)
+    for y in FCST:
+        put(ws, 3, 2 + YRS.index(y), f'{y}E', 't', bold=True, align='center').fill = TOT_FILL
+    put(ws, 3, 10, '备注', 't', bold=True)
+
+    E = {}
+    r = 4
+    def erow(key, label, fn, fmt=NUM, bold=False, note=''):
+        nonlocal r
+        put(ws, r, 1, label, 't', bold=bold)
+        for y in FCST:
+            put(ws, r, 2 + YRS.index(y), fn(y), 'f', fmt, bold=bold)
+        put(ws, r, 10, note, 'g', size=9)
+        E[key] = r
+        r += 1
+
+    erow('np', '归母净利润', lambda y: f"={ISs}!{YC[y]}{I['np_p']}", NUM, False, '=IS归母净利(含FIN调度后的利息)')
+    erow('da', '加: D&A', lambda y: f"={PPEs}!{YC[y]}{P['da']}", NUM, False, '=PP&E页折旧+无形摊销')
+    erow('dnwc', '减: ΔNWC', lambda y: f"={SCH}!{YC[y]}{S['dnwc']}", NUM, False, '=Schedules; NWC增加为现金流出')
+    erow('capex', '减: Capex', lambda y: f"={PPEs}!{YC[y]}{P['capex']}", NUM, False, '=PP&E页资本开支')
+    erow('ddebt', '加: 净新增借款', lambda y: f"={FINs}!{YC[y]}{F['ddebt']}", NUM, False,
+         '=FIN四档债务期末-期初(revolver新增-sweep偿还-计划还款); 股权口径下债务净变动归股东')
+    erow('fcfe', 'FCFE', lambda y: f"={YC[y]}{E['np']}+{YC[y]}{E['da']}-{YC[y]}{E['dnwc']}-{YC[y]}{E['capex']}+{YC[y]}{E['ddebt']}", NUM, True,
+         '=归母+D&A-ΔNWC-Capex+净新增借款')
+    erow('t_idx', '折现年序(年中)', lambda y: 0.5 + FCST.index(y), '0.0', False, '年中折现, 与DCF页同口径')
+    erow('df', '折现因子 (Ke)', lambda y: f"=1/(1+KE)^{YC[y]}{E['t_idx']}", '0.000', False, '=1/(1+Ke)^t; Ke为named range(Assumptions股权成本)')
+    erow('pv', 'PV(FCFE)', lambda y: f"={YC[y]}{E['fcfe']}*{YC[y]}{E['df']}")
+    r += 1
+
+    def ecell(key, label, formula, fmt=NUM, bold=False, note=''):
+        nonlocal r
+        put(ws, r, 1, label, 't', bold=bold)
+        put(ws, r, 4, formula, 'f', fmt, bold=bold)
+        put(ws, r, 10, note, 'g', size=9)
+        E[key] = r
+        r += 1
+
+    ecell('pv_sum', f'显性期PV合计 ({F0}-{F1})', f"=SUM({YC[F0]}{E['pv']}:{YC[F1]}{E['pv']})", NUM, True)
+    ecell('tv', '终值 TV (Gordon)', f"={YC[F1]}{E['fcfe']}*(1+TERM_G)/(KE-TERM_G)", NUM, False,
+          f'=FCFE{F1}×(1+g)/(Ke-g); Ke/g均为named range')
+    ecell('pv_tv', 'PV(终值)', f"=D{E['tv']}*{YC[F1]}{E['df']}", NUM, False, f'终值按t={NF-0.5}折现(与DCF页一致)')
+    ecell('eq', '股权价值 (FCFE口径)', f"=D{E['pv_sum']}+D{E['pv_tv']}", NUM, True, 'FCFE直接折现为股权价值, 无需净现金桥')
+    ecell('ps', '每股价值 (元)', f"=D{E['eq']}/SHARES_DIL", PS, True, '=股权价值/稀释股数(named range)')
+    ecell('ps_fcff', '对照: FCFF口径每股价值 (元)', f"={DCFs}!D{D['ps']}", PS, False, '=DCF页主输出')
+    ecell('diff', '两法差异 (FCFE/FCFF-1)', f"=D{E['ps']}/D{E['ps_fcff']}-1", PCT, True, ' Checks页含一致性信息行')
+    put(ws, r, 1, '两法差异原因', 't', bold=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    put(ws, r, 2, '①折现率不同: FCFF按WACC(全资本成本, 税盾在分母)折现, FCFE按Ke(纯股权成本)折现; '
+                  '②口径不同: FCFF为企业自由现金流, 须经EV→Equity桥加回净现金/扣有息负债, FCFE已含净新增借款、直接对应股权; '
+                  '③杠杆路径不同: FCFE逐年反映FIN页revolver/sweep实际债务调度(资本结构动态变化), FCFF隐含目标结构(Wd)恒定; '
+                  '④两法在"恒定资本结构+一致税盾处理"下理论等价, 实务差异主要来自债务调度时点、净现金桥与折现率差; 差异幅度大时应复查融资假设',
+        'g', size=9, wrap=True)
+    ws.row_dimensions[r].height = 52
+    r += 1
+    FCFEs = 'FCFE'
+
+    # ============================================================
     # Relative_Val (可比公司 + Beta unlever/relever)
     # ============================================================
     ws = wb.create_sheet('Relative_Val')
@@ -1616,6 +1704,19 @@ def build(cfg, out_path, addr_path):
     put(ws, r, 1, f'相对现价{cfg.v("market.price")}元空间', 't')
     put(ws, r, 3, f"=C{P_LO}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     put(ws, r, 4, f"=C{P_HI}/{ASheet}!$C${A['px']}-1", 'f', PCT)
+    r += 1
+    # 研究层: 一致预期目标价对照行 (仅 --consensus 激活)
+    TP_ROW = None
+    _cons_ctx = (research or {}).get('consensus')
+    if _cons_ctx and _cons_ctx.get('target_price'):
+        _tp = float(_cons_ctx['target_price'])
+        put(ws, r, 1, '一致预期目标价 (外部文件)', 't', bold=True)
+        put(ws, r, 3, _tp, 'x', PS)
+        put(ws, r, 4, f"=C{r}/{ASheet}!$C${A['px']}-1", 'f', PCT)
+        put(ws, r, 11, f"来源: {_cons_ctx['source']}{' ' + _cons_ctx['date'] if _cons_ctx['date'] else ''}; "
+                       '右=较现价空间; 与模型DCF对照见Checks页信息行', 'g', size=9)
+        TP_ROW = r
+        r += 1
     RVs = 'Relative_Val'
     REL_MED_PE = f"{RVs}!$F${MED_ROW}" if N_BETA else f"{RVs}!$C${PE_LO}"
 
@@ -1850,6 +1951,8 @@ def build(cfg, out_path, addr_path):
          f"分部增速+{_sc_bull['rev_adj']*100:g}pct/净利率+{_sc_bull['npm_adj']*100:g}pct"),
         (f'相对估值 — 模型{F0}E归母', _pe_band, f"={RVs}!C{P_LO}", f"={RVs}!C{P_HI}", f'模型基准{F0}E归母×目标PE带'),
         (f'相对估值 — 一致预期{F0}E归母', _pe_band, f"={RVs}!C{P_CONS_LO}", f"={RVs}!D{P_CONS_LO}", f'一致预期{cons_np_v[0]/100:.1f}亿×目标PE带'),
+        ('FCFE股权现金流 — 基准', 'Ke折现(股权口径)', f"={FCFEs}!D{E['ps']}", f"={FCFEs}!D{E['ps']}",
+         'FCFE=归母+D&A-ΔNWC-Capex+净新增借款(FIN调度), 与FCFF双视图对照'),
     ]
     for name, basis, flo, fhi, note in ff_rows:
         put(ws, r, 1, name, 't', bold=True)
@@ -1867,8 +1970,8 @@ def build(cfg, out_path, addr_path):
     PX_ROW = r
     r += 1
     put(ws, r, 1, '综合参考区间(全方法包络)', 't', bold=True)
-    put(ws, r, 3, f"=MIN(C{FF_FIRST}:C{FF_FIRST+4})", 'f', PS, bold=True, fill=CHK_FILL)
-    put(ws, r, 4, f"=MAX(D{FF_FIRST}:D{FF_FIRST+4})", 'f', PS, bold=True, fill=CHK_FILL)
+    put(ws, r, 3, f"=MIN(C{FF_FIRST}:C{FF_FIRST+len(ff_rows)-1})", 'f', PS, bold=True, fill=CHK_FILL)
+    put(ws, r, 4, f"=MAX(D{FF_FIRST}:D{FF_FIRST+len(ff_rows)-1})", 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 5, f"=(C{r}+D{r})/2", 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 6, f"=E{r}/{ASheet}!$C${A['px']}-1", 'f', PCT, bold=True, fill=CHK_FILL)
     put(ws, r, 7, '熊简化法DCF下限 ~ 牛简化法/相对估值上限的包络', 'g', size=9)
@@ -1896,6 +1999,24 @@ def build(cfg, out_path, addr_path):
     # ============================================================
     # Checks 校验页
     # ============================================================
+    # 关键驱动 named ranges (审计轨迹): WACC采用值/永续g/税率/股数/情景开关等15个
+    NAMED_RANGES = {
+        'SCEN_SWITCH': f"Assumptions!$C${A['sw']}",
+        'WACC_USED': f"Assumptions!$C${A['wacc']}",
+        'WACC_CALC': f"Assumptions!$C${A['wacc_calc']}",
+        'TERM_G': f"Assumptions!$C${A['tg']}",
+        'KE': f"Assumptions!$C${A['ke']}",
+        'KD': f"Assumptions!$C${A['kd']}",
+        'RF_RATE': f"Assumptions!$C${A['rf']}",
+        'ERP': f"Assumptions!$C${A['erp']}",
+        'BETA_U': f"Assumptions!$C${A['beta_u']}",
+        'TAX_RATE_Y1': f"Assumptions!$C${A['tax']}",
+        'PAYOUT_Y1': f"Assumptions!$C${A['payout']}",
+        'MIN_CASH_PCT': f"Assumptions!$C${A['min_cash_pct']}",
+        'SHARES_DIL': f"Equity_Roll!$C${Q['shares']}",
+        'DCF_PS': f"DCF!$D${D['ps']}",
+        'FCFE_PS': f"FCFE!$D${E['ps']}",
+    }
     ws = wb.create_sheet('Checks')
     title_bar(ws, f'{NAME} — Checks 自动校验',
               '所有校验为公式, 应全部显示TRUE; 任一FALSE请检查模型; 容差0.01')
@@ -1950,6 +2071,9 @@ def build(cfg, out_path, addr_path):
            'sweep/还款均以MAX(0,·)兜底')
     chkrow('11. FIN迭代残差<0.01 (迭代展开收敛)', lambda y: f"={FINs}!{YC[y]}{F['resid_max']}<0.01", FCST,
            '第4轮采用值 vs 按期末余额重算隐含值; 全簿无循环引用, 无需开启迭代计算')
+    chkcell('12. Named ranges存在性 (审计轨迹, 15个)',
+            "=AND(" + ",".join(f'ISNUMBER(INDIRECT("{n}"))' for n in NAMED_RANGES) + ")",
+            'WACC采用值/永续g/Ke/Kd/rf/ERP/βu/税率/股利/最低现金/情景开关/稀释股数/DCF&FCFE每股; 任一named range被删则FALSE')
     r += 1
     put(ws, r, 1, '信息项: 隐含折旧率(折旧/期初固资净值)', 't')
     for y in FCST:
@@ -1964,6 +2088,15 @@ def build(cfg, out_path, addr_path):
     put(ws, r, 2, f"={ASheet}!C{A['wacc_calc']}", 'f', PCT)
     put(ws, r, 3, f"={ASheet}!C{A['wacc']}", 'f', PCT)
     put(ws, r, 10, '左=计算值, 右=采用值(override为空时两者相等)', 'g', size=9); r += 1
+    put(ws, r, 1, '信息项: FCFE/FCFF每股价值比', 't')
+    put(ws, r, 2, f"={FCFEs}!D{E['ps']}/{DCFs}!D{D['ps']}", 'f', PCT)
+    put(ws, r, 3, f"={FCFEs}!D{E['ps']}", 'f', PS)
+    put(ws, r, 10, '左=FCFE/FCFF比值, 右=FCFE每股(元); 两法差异原因见FCFE页底部注记', 'g', size=9); r += 1
+    if TP_ROW:
+        put(ws, r, 1, '信息项: 一致预期目标价 vs DCF基准', 't')
+        put(ws, r, 2, f"={RVs}!C{TP_ROW}", 'f', PS)
+        put(ws, r, 3, f"={RVs}!C{TP_ROW}/{DCFs}!D{D['ps']}-1", 'f', PCT)
+        put(ws, r, 10, '左=目标价(元), 右=目标价较模型DCF溢价; 来源见Relative_Val目标价行', 'g', size=9); r += 1
     put(ws, r, 1, f'信息项: {F1}E现金 vs 最低现金', 't')
     put(ws, r, 2, f"={BSs}!{YC[F1]}{B['cash']}", 'f', NUM)
     put(ws, r, 3, f"={FINs}!{YC[F1]}{F['mincash']}", 'f', NUM)
@@ -2076,16 +2209,76 @@ def build(cfg, out_path, addr_path):
     put(ws, r, 2, '免责声明: 本模型仅为研究学习用途, 所有预测基于公开信息与主观假设, 不构成任何投资建议或证券买卖要约。历史数据虽经核对来源, 仍可能存在口径差异或错误; 预测存在重大不确定性。使用者应自行判断并承担风险。',
         'g', size=9, wrap=True)
 
+    # ============================================================
+    # 研究层产出页 (DR研究 / 研究摘要; 仅 --dr/--consensus/--announcements/--llm 激活时生成)
+    # ============================================================
+    EXTRA_SHEETS = []
+    if research:
+        from research.sheets import build_dr_sheet, build_summary_sheet
+        if research.get('dr'):
+            build_dr_sheet(wb, research['dr'], put, title_bar, sec)
+            EXTRA_SHEETS.append('DR研究')
+
+        trows = []   # (假设项, 采用值, 来源, 置信度, 备注)
+        trows.append(('WACC 采用值', ('f', f'=TEXT({ASheet}!C{A["wacc"]},"0.00%")&" (计算值 "&TEXT({ASheet}!C{A["wacc_calc"]},"0.00%")&")"'),
+                      '可比公司β unlever/relever实算(Relative_Val页L-O列→Assumptions第十节)', '中(实算)', '采用值=IF(override="",计算值,override)'))
+        trows.append(('永续增长率 g', f"{a1('wacc.tg'):.1%}", ab('wacc.tg'), '中(分析师假设)', 'Sensitivity页做WACC×g双维敏感性'))
+        trows.append((f'有效税率 ({F0}E)', f"{a5('opex.tax_rate')[0]:.1%}", ab('opex.tax_rate'), '中(分析师假设)', ''))
+        trows.append(('Capex占收入比路径', ' → '.join(f"{v:.0%}" for v in a5('capex.capex_rate')),
+                      ab('capex.capex_rate'), '中(分析师假设)', ''))
+        trows.append(('DSO/DIO/DPO路径 (天)',
+                      ' / '.join(' → '.join(f"{v:.0f}" for v in a5(f'working_capital.{k}')) for k in ('dso', 'dio', 'dpo')),
+                      ab('working_capital.dso'), '中(分析师假设)', 'DPO单维敏感性见Sensitivity矩阵三'))
+        trows.append(('股利支付率', f"{a5('dividend.payout')[0]:.0%}", ab('dividend.payout'), '中(分析师假设)', ''))
+        _scb, _scu = cfg.raw['scenarios']['bear'], cfg.raw['scenarios']['bull']
+        trows.append(('情景调整 (熊/牛)', f"增速{_scb['rev_adj']:+.0%}/{_scu['rev_adj']:+.0%}, 净利率{_scb['npm_adj']:+.1%}/{_scu['npm_adj']:+.1%}",
+                      f"熊: {_scb.get('logic', '')}; 牛: {_scu.get('logic', '')}", '低(情景假设)', '基准=主模型输出'))
+
+        if research.get('dr'):
+            dr = research['dr']
+            for f in dr['findings'][:12]:
+                trows.append((f"档案§{f['section']} {f['title']}", f['text'],
+                              f"dr档案({os.path.basename(dr['path'])})", '高(研究档案)',
+                              '已按关键词回填相关假设的依据列(标注dr档案§章节号)'))
+
+        if research.get('consensus'):
+            cc = research['consensus']
+            csrc = f"{cc['source']}{' ' + cc['date'] if cc['date'] else ''} (--consensus文件)"
+            for i, y in enumerate(FCST[:3]):
+                if i < len(cons_rev_v):
+                    trows.append((f'一致预期{y}E营收', f'{cons_rev_v[i]:,.0f}百万', csrc, '中高(卖方一致预期)',
+                                  ('f', f'="模型 "&TEXT({ISs}!{YC[y]}{I["rev"]},"#,##0")&" 百万, 占一致预期 "'
+                                        f'&TEXT({ISs}!{YC[y]}{I["rev"]}/{cons_rev_v[i]},"0.0%")')))
+                if i < len(cons_np_v):
+                    trows.append((f'一致预期{y}E归母', f'{cons_np_v[i]:,.0f}百万', csrc, '中高(卖方一致预期)',
+                                  ('f', f'="模型 "&TEXT({ISs}!{YC[y]}{I["np_p"]},"#,##0")&" 百万, 占一致预期 "'
+                                        f'&TEXT({ISs}!{YC[y]}{I["np_p"]}/{cons_np_v[i]},"0.0%")')))
+            if cc.get('target_price'):
+                trows.append(('一致预期目标价', f"{float(cc['target_price']):.2f}元", csrc, '中高(卖方一致预期)',
+                              ('f', f'="模型DCF "&TEXT({DCFs}!D{D["ps"]},"0.00")&" 元, 目标价较模型 "'
+                                    f'&TEXT({cc["target_price"]}/{DCFs}!D{D["ps"]}-1,"+0.0%;-0.0%")')))
+
+        for it in (research.get('announcements') or {}).get('items') or []:
+            trows.append(('公告要点', it, '东财业绩预告/业绩快报(系统curl)', '高(公司公告事实)', ''))
+
+        build_summary_sheet(wb, research, trows, research.get('memo'), put, title_bar, sec)
+        EXTRA_SHEETS.append('研究摘要')
+
     # ---------- 计算设置 (全簿已无循环引用, 不依赖迭代设置; 保留无害) ----------
     wb.calculation.iterate = True
     wb.calculation.iterateCount = 1000
     wb.calculation.iterateDelta = 0.0001
     wb.calculation.fullCalcOnLoad = True
 
+    # ---------- Named ranges (关键驱动审计轨迹; FCFE/Checks公式已引用) ----------
+    from openpyxl.workbook.defined_name import DefinedName
+    for _n, _ref in NAMED_RANGES.items():
+        wb.defined_names[_n] = DefinedName(_n, attr_text=_ref)
+
     # ---------- 工作表顺序 ----------
     ORDER = ['Cover', 'Summary', 'Assumptions', 'Revenue_Segments', 'IS', 'BS', 'CF',
-             'Schedules', 'PPE', 'FIN', 'Equity_Roll', 'DCF', 'Relative_Val',
-             'Sensitivity', 'Scenarios', 'Checks']
+             'Schedules', 'PPE', 'FIN', 'Equity_Roll', 'DCF', 'FCFE', 'Relative_Val',
+             'Sensitivity', 'Scenarios', 'Checks'] + EXTRA_SHEETS
     wb._sheets = [wb[n] for n in ORDER]
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
@@ -2094,9 +2287,13 @@ def build(cfg, out_path, addr_path):
 
     addr = {
         'meta': {'code': co.get('code'), 'code_full': CODE_FULL, 'name': NAME,
-                 'hist_years': HIST, 'fcst_years': FCST, 'valuation_date': VAL_DATE},
+                 'hist_years': HIST, 'fcst_years': FCST, 'valuation_date': VAL_DATE,
+                 'research_sheets': EXTRA_SHEETS},
         'dcf_ps': f"DCF!D{D['ps']}", 'dcf_upside': f"DCF!D{D['upside']}",
         'dcf_ev': f"DCF!D{D['ev']}", 'dcf_eq': f"DCF!D{D['eq']}",
+        'fcfe_ps': f"FCFE!D{E['ps']}", 'fcfe_eq': f"FCFE!D{E['eq']}",
+        'fcfe_fcff_ps': f"FCFE!D{E['ps_fcff']}", 'fcfe_diff': f"FCFE!D{E['diff']}",
+        'named_ranges': NAMED_RANGES,
         'bs_chk_row': B['chk'], 'checks_sum': f"Checks!{SUM_CELL}", 'checks_bool': f"Checks!{BOOL_CELL}",
         'scen_bear_ps': f"Scenarios!B{scen_rows['bear']['ps']}",
         'scen_base_ps': f"Scenarios!B{scen_rows['base']['ps']}",
@@ -2134,21 +2331,32 @@ def build(cfg, out_path, addr_path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='A股机构级估值模型生成器 (DCF+三表+FIN调度, 16 sheets)')
+    ap = argparse.ArgumentParser(description='A股机构级估值模型生成器 (DCF+FCFE+三表+FIN调度, 17 sheets)')
     ap.add_argument('--code', help='A股代码, 如 300476; 读取 configs/<code>.yaml')
     ap.add_argument('--config', help='直接指定YAML配置路径')
     ap.add_argument('--out', help='输出xlsx路径 (默认 out/<code>_<名称>_估值模型.xlsx)')
     ap.add_argument('--addr', help='单元格地址json输出路径 (默认随xlsx同名)')
+    ap.add_argument('--dr', help='研究层: 导入深度研究档案(md), 量化结论回填假设依据 + DR研究/研究摘要两页')
+    ap.add_argument('--consensus', help='研究层: 聚源/gildata一致预期文件(json/csv, 含目标价)')
+    ap.add_argument('--announcements', action='store_true',
+                    help='研究层: 东财业绩预告/快报(系统curl)最新一期要点进研究摘要')
+    ap.add_argument('--llm', default='off', choices=['auto', 'claude', 'codex', 'off'],
+                    help='研究层: 本机LLM CLI生成研究备忘录 (默认off)')
     args = ap.parse_args()
     if not args.code and not args.config:
         ap.error('需提供 --code 或 --config')
     cfg = load_config(code=args.code, config_path=args.config)
+    research = None
+    if args.dr or args.consensus or args.announcements or args.llm != 'off':
+        from research import collect_research
+        research = collect_research(cfg, dr_path=args.dr, consensus_path=args.consensus,
+                                    want_announcements=args.announcements, llm=args.llm)
     code = args.code or cfg.get('company.code')
     name = cfg.get('company.name', code)
     out_path = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                         'out', f'{code}_{name}_估值模型.xlsx')
     addr_path = args.addr or os.path.splitext(out_path)[0] + '.addr.json'
-    build(cfg, out_path, addr_path)
+    build(cfg, out_path, addr_path, research=research)
 
 
 if __name__ == '__main__':
