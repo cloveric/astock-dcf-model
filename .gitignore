@@ -1,0 +1,14 @@
+# 产物与缓存
+out/
+.cache/
+__pycache__/
+*.pyc
+
+# 模型产物默认不入库 (examples/ 下的样例除外)
+*.xlsx
+*.addr.json
+!examples/**/*.xlsx
+!examples/**/*.addr.json
+
+# 系统杂项
+.DS_Store
