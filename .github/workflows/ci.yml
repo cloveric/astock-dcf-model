@@ -14,9 +14,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Syntax check
         run: python -m py_compile build_model.py fetch_data.py verify_model.py research/*.py tests/*.py web/*.py
+      - name: Unit tests (offline, pytest)
+        run: python -m pytest tests/test_units.py -q
       - name: Build from in-repo fixture config (offline)
         run: python build_model.py --config configs/300476.yaml --out ci_model.xlsx --addr ci_model.addr.json
       - name: Smoke check (structure / named ranges / Checks rows)
@@ -39,11 +41,12 @@ jobs:
           assert sig('ci_a.xlsx') == sig('ci_b.xlsx'), 'non-deterministic build'
           print('idempotent: OK')
           EOF
-      - name: LibreOffice recalc + full verify (if soffice available)
+      - name: LibreOffice recalc + full verify + golden assert (if soffice available)
         run: |
           sudo apt-get install -y libreoffice-calc >/dev/null 2>&1 || true
           if command -v soffice >/dev/null; then
             python verify_model.py ci_model.xlsx --addr ci_model.addr.json --workdir .cache/lo_ci
+            # 300476 黄金值断言(DCF每股==340.415208186145, 容差0)在 verify_model.py 内自动触发
           else
             echo "soffice unavailable, skipped (offline smoke already passed)"
           fi
