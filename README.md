@@ -36,7 +36,7 @@ A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利�
 ## 架构
 
 ```
-数据层   东财F10(三表/主营构成, 系统curl)  腾讯行情(现价/市值/PE)  一致预期文件(--consensus)
+数据层   东财F10(三表/主营构成, 系统curl)  东财HKF10(港股三表)  腾讯行情(现价/市值/PE, 含hkXXXXX)  一致预期文件(--consensus)
             │                                        │
             ▼                                        │
        fetch_data.py  ── 兜底推导(缺配置时) ──┐        │
@@ -85,7 +85,7 @@ A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利�
 ```bash
 git clone https://github.com/cloveric/astock-dcf-model.git
 cd astock-dcf-model
-pip install -r requirements.txt        # openpyxl / pyyaml; 验收环节需本机 LibreOffice
+pip install -r requirements.txt        # openpyxl / pyyaml / fastapi / uvicorn; 验收环节需本机 LibreOffice
 ```
 
 最小命令:
@@ -129,6 +129,47 @@ python build_model.py --code 300476 \
 - `--consensus <json/csv>`: 一致预期文件(2026-28E 营收/归母/目标价, 单位: 百万元/元), 覆盖配置 `consensus` 段并在 Relative_Val 与 Checks 各加一行目标价一致性对照。工具不直连付费源: 有 MCP gildata 工具的环境可由调用方拉取后写成该文件再传入, 格式见 `examples/research/consensus_300476.json`。
 - `--announcements`: 东财数据中心业绩预告/业绩快报(系统 curl, python 不直连东财), 最新一期要点进研究摘要。
 - `--llm auto|claude|codex|off`: 本机存在对应 CLI 时生成一段研究备忘录写入研究摘要页眉; 不存在或调用失败仅记录降级说明, 默认 `off`。
+
+## Web 模式
+
+本机任务制 Web 服务(FastAPI + 自包含单页前端, 零构建、无 Node 依赖):
+
+```bash
+python -m web.server          # http://127.0.0.1:8000 (HOST/PORT 环境变量可改)
+```
+
+- 提交表单: 证券代码(6 位 A 股 / 5 位港股) + 可选配置文件路径 + 研究层四个开关(dr/consensus/announcements/llm); 任务列表自动轮询进度, 完成后出现下载按钮, 失败可查看构建日志尾部;
+- 接口: `POST /api/jobs` 提交, `GET /api/jobs` 历史列表, `GET /api/jobs/{id}` 详情(含日志尾部), `GET /api/jobs/{id}/download` 下载 xlsx;
+- 实现纪律: 建模逻辑零重写——单 worker 线程串行调用 `build_model.py` 子进程; 任务状态落盘 `web/.data/jobs.json`(原子写), 产物与日志存 `web/.data/out/<任务id>/`; 服务重启时未完成任务标记为失败(中断); config/dr/consensus 仅接受仓库内已存在文件, 防路径穿越。
+
+## Docker
+
+```bash
+docker build -t astock-dcf-model .
+docker run -p 8000:8000 astock-dcf-model        # 打开 http://127.0.0.1:8000
+```
+
+镜像基于 `python:3.12-slim`, 预装 curl(数据层只走系统 curl)与 libreoffice-calc(容器内可做 `verify_model.py` 重算验收); 容器内亦可直接执行 `python build_model.py --code 300476`。
+
+## 港股支持 (5 位代码)
+
+```bash
+python fetch_data.py --code 00981     # 腾讯hk行情 + 东财HKF10三表(IFRS) → configs/00981.yaml
+python build_model.py --code 00981
+python verify_model.py --code 00981
+```
+
+港股路径: 行情走腾讯 `hkXXXXX`(港元现价/总市值/PE-TTM, 字段版式与 A 股一致); 财务走东财 HKF10 datacenter 接口(系统 curl, IFRS 科目映射为模型 hist 结构)。已收录 `configs/00981.yaml`(中芯国际, 自动生成后按研究修正)与 `examples/00981_verify.txt` 验收日志。
+
+口径与局限(使用前必读):
+
+- **币种**: 模型内部一律用财报币种百万(如中芯国际为美元); 港元现价/总市值按配置 `market.fx_hkd`(手工输入, 美元联系汇率区间中枢 7.80)折算, Cover 页注明; PE-TTM 为港元行情口径, 仅供对照;
+- **现金流量表折算**: 东财 HKF10 现金流量表仅人民币口径, 按"期末现金 ÷ BS 现金及等价物"的隐含汇率逐年折算回财报币种(各年依据列注明), 因此 CF 期末现金与 BS 严格勾稽, 但流量项存在期末汇率近似;
+- **IFRS 科目映射**: 无税金及附加/法定盈余公积/一年内到期非流动负债单列, 使用权资产并入物业厂房及设备; 各年"其他"科目为轧差项, 历史严格配平;
+- **单段收入**: 港股无东财"主营构成(按产品)"披露, 兜底为整体单段(增速=总收入 YoY 退坡), 务必按研究拆分修正;
+- **市值口径**: 港股总市值 = 全部股本 × 港元价, 对 A+H 两地上市公司与实际加权市值存在差异;
+- **偿债假设**: 兜底"余额 1/5 逐年摊还"会使重资产扩产标的 FCFE 机制性深负(期初存量现金被一次性 sweep 偿债亦然); `configs/00981.yaml` 已按公司实际(有息负债稳定、现金为资本开支储备)修正为滚动续作 + 最低现金 60%, 换标的时按研究修正;
+- **无涨跌停**: 港股无单日涨跌停限制(A 股 ±10%/20%), 口径差异已在 Cover 页注明, 不影响模型公式。
 
 ## 配置规范
 
@@ -174,7 +215,8 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 ## 数据口径
 
 - **东财 F10**(三表/主营构成): 一律经系统 curl 子进程抓取(python 不直连东财), 单位统一换算为人民币百万元;
-- **腾讯行情**(qt.gtimg.cn): 现价/总市值/PE-TTM; 总股本 = 总市值 / 现价;
+- **东财 HKF10**(港股三表): datacenter 长表接口, 系统 curl; IFRS 科目映射, 金额为财报币种(详见"港股支持"节的口径说明);
+- **腾讯行情**(qt.gtimg.cn): 现价/总市值/PE-TTM(A 股与港股 hkXXXXX 同版式); 总股本 = 总市值 / 现价;
 - **一致预期**: 不直连付费源。`--consensus` 文件输入(聚源/gildata 口径), 或查实后手工填入配置 `consensus` 段(依据注明来源与日期), 缺省时按最近年报增速外推占位并标注"自动推导";
 - **可比公司 βl / D/E**: 分析师输入项(参考行情终端 β 与最新年报杠杆);
 - 历史 BS 的若干"其他"科目为轧差项(= 合计 − 明细), 保证历史严格配平; 0.1 级尾差构建时并入"其他权益项目"清零。
@@ -188,8 +230,10 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 | 胜宏科技 300476 | 完整手工配置 | **340.415208186145 元** | 325.4138 元(−4.4%) | 全期 = 0.00 | ≤ 1.6e-6 | **12/12 TRUE** |
 | 沪电股份 002463 | fetch_data 全自动 | 112.2922 元 | 107.5540 元(−4.2%) | 全期 = 0.00 | ≤ 4.6e-7 | **12/12 TRUE** |
 | 工业富联 601138 | 兜底(零配置) | 52.4651 元 | 22.3582 元(−57.4%¹) | 全期 = 0.00 | < 0.01 | **12/12 TRUE** |
+| 中芯国际 00981.HK | HKF10 全自动 + 手工修正(偿债滚动/现金储备) | 3.2101 美元 | 0.6766 美元(−78.9%²) | 全期 = 0.00 | ≤ 1.8e-6 | **12/12 TRUE** |
 
 ¹ 兜底还款计划大幅去杠杆, FCFE 含净新增借款流出, 两法机制性拉开; 差异说明见 FCFE 页底部注记。
+² 港股重资产扩产标的: 最低现金按收入 60% 保留为资本开支储备(不参与 sweep), FCFF 经 EV→Equity 桥确认期初净现金而 FCFE 将储备留存表内, 叠加兜底增速退坡, 两法机制性拉开; 模型值低于市价为兜底假设与市场预期的差异, 非公式错误。
 
 **复现零差异**: 0.2.0 升级(FCFE 页/named ranges/研究层)后重跑 300476, 既有 16 张表逐单元格数值与 0.1.0 完全一致(仅 Summary/Checks 新增 FCFE 与 named-range 行, Cover 两处引用行号联动、值不变), DCF 每股精确等于 340.415208186145 元。
 
@@ -204,12 +248,12 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 - 预测期资产减值/投资收益等非经常项简化为固定小额, 以保证三表严格配平;
 - 理财净变动简化: 缺口年不赎回; 处置固定资产按账面值回收无损益;
 - 年中折现为估值基准日与财年起点的标准近似, 不做 stub 调整;
-- FCFE 在融资计划大幅加/去杠杆的标的上与 FCFF 机制性偏离, 属口径特征而非错误。
+- FCFE 在融资计划大幅加/去杠杆的标的上与 FCFF 机制性偏离, 属口径特征而非错误;
+- **港股**: IFRS 科目映射存在轧差项、现金流量表按隐含汇率折算回财报币种、单段收入简化、市值为全股本×港元价口径——完整清单见"港股支持"节, 换标的时务必按研究修正配置。
 
 ## 工程化
 
-- CI(`.github/workflows/ci.yml`)离线可跑: 语法检查 → 用仓库内 `configs/300476.yaml` 构建 → `tests/smoke_check.py` 结构冒烟(17 表/15 个 named ranges/Checks 12 项/addr 完整) → 双构建幂等性断言 → 环境有 LibreOffice 时追加全量验收;
-- 贡献准则见 [CONTRIBUTING.md](./CONTRIBUTING.md), 安全披露见 [SECURITY.md](./SECURITY.md), 版本历史见 [CHANGELOG.md](./CHANGELOG.md), AI 协作者说明见 [AGENTS.md](./AGENTS.md)。
+- CI(`.github/workflows/ci.yml`)离线可跑: 语法检查 → 用仓库内 `configs/300476.yaml` 构建 → `tests/smoke_check.py` 结构冒烟(17 表/15 个 named ranges/Checks 12 项/addr 完整) → 双构建幂等性断言 → 环境有 LibreOffice 时追加全量验收;- 贡献准则见 [CONTRIBUTING.md](./CONTRIBUTING.md), 安全披露见 [SECURITY.md](./SECURITY.md), 版本历史见 [CHANGELOG.md](./CHANGELOG.md), AI 协作者说明见 [AGENTS.md](./AGENTS.md)。
 
 ## 免责声明
 

@@ -2,6 +2,23 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-08-17
+
+### 新增
+- **Web 模式(`web/`)**: FastAPI 后端 + 自包含单页前端(零构建、原生 fetch 轮询); `POST /api/jobs` 提交建模任务(代码 + config/dr/consensus/announcements/llm 开关), `GET /api/jobs` 历史列表, `GET /api/jobs/{id}` 进度与日志尾部, `GET /api/jobs/{id}/download` 下载 xlsx; 单 worker 线程串行调用 `build_model.py` 子进程(建模逻辑零重写), 任务状态落盘 `web/.data/jobs.json`, 产物存 `web/.data/out/`; `python -m web.server` 单命令启动。
+- **Docker**: `Dockerfile`(python:3.12-slim + curl + libreoffice-calc, EXPOSE 8000, CMD 启动 Web 服务)与 `.dockerignore`。
+- **港股支持(5 位代码)**:
+  - `fetch_data.py`: 腾讯行情 `hkXXXXX` 直连(现价/总市值/PE-TTM); 东财 HKF10 datacenter 接口(系统 curl)拉取 IFRS 三表并映射为模型 hist 结构(2023-2025 年报); 单段收入兜底(港股无主营构成披露);
+  - 币种口径: 模型内部用财报币种百万, 港元现价按配置 `market.fx_hkd` 折算; 现金流量表(人民币口径)按隐含汇率折算回财报币种, CF-BS 现金严格勾稽;
+  - `build_model.py`: `company.unit` 可覆盖各页单位注记; HK 标的 Cover 页自动注明"无涨跌停/币种折算"口径(仅 HK 触发, A 股输出零差异);
+  - 收录 `configs/00981.yaml`(中芯国际, HKF10 全自动 + 手工修正偿债滚动与现金储备口径)与 `examples/00981_verify.txt`。
+
+### 验证
+- 铁律复验: 重跑 300476, 基准 DCF 每股精确等于 340.415208186145 元, 与 0.2.0 成稿逐单元格零差异, LibreOffice 重算 Checks 12/12 TRUE(ALL PASS);
+- Web 端到端实测: 启动服务 → 提交 300476 → 完成 → 下载 xlsx → LibreOffice 重算 ALL PASS;
+- 港股实测: 00981 中芯国际构建 + LibreOffice 重算, Checks 12/12 TRUE, verify ALL PASS(DCF 3.2101 美元 / FCFE 0.6766 美元, 两法差异为口径特征, 见 README 港股节);
+- Dockerfile 经静态检查(本机无 docker 环境, 未实际 build)。
+
 ## [0.2.0] - 2026-08-17
 
 ### 新增

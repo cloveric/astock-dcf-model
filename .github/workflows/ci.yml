@@ -16,7 +16,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
       - name: Syntax check
-        run: python -m py_compile build_model.py fetch_data.py verify_model.py research/*.py tests/*.py
+        run: python -m py_compile build_model.py fetch_data.py verify_model.py research/*.py tests/*.py web/*.py
       - name: Build from in-repo fixture config (offline)
         run: python build_model.py --config configs/300476.yaml --out ci_model.xlsx --addr ci_model.addr.json
       - name: Smoke check (structure / named ranges / Checks rows)

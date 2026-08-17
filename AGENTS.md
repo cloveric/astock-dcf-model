@@ -15,15 +15,19 @@ A 股机构级 DCF 估值模型生成器。`build_model.py --code <6位代码>` 
 3. **每个假设带依据**: YAML 每个假设条目必须有 `basis` 字段; 兜底自动推导的也必须标注"自动推导"。
 4. **东财只走系统 curl**: 禁止 python 直接 requests/urllib 访问东财(反爬纪律); 行情走腾讯 qt.gtimg.cn。
 5. **研究层开关默认关闭**: 不传 `--dr/--consensus/--announcements/--llm` 时输出必须与默认路径完全一致。
+6. **港股口径不许造假**: 5 位代码走 HKF10(IFRS 映射); 财报币种 ≠ 港元时按配置 fx_hkd 折算并注明;
+   现金流量表仅人民币口径, 按隐含汇率折算回财报币种; 接口拿不到的数据走手工配置, 禁止编造。
 
 ## 结构
 
-- `build_model.py` — 单文件构建器(~2200 行), 各 sheet 依次建骨架后回填公式; 单元格地址索引导出 addr.json。
-- `fetch_data.py` — 数据层: 东财 F10 三表/主营构成、腾讯行情、兜底配置推导。
+- `build_model.py` — 单文件构建器(~2400 行), 各 sheet 依次建骨架后回填公式; 单元格地址索引导出 addr.json。
+- `fetch_data.py` — 数据层: 东财 F10 三表/主营构成、东财 HKF10 港股三表(IFRS 映射)、腾讯行情(A股+hkXXXXX)、兜底配置推导。
 - `verify_model.py` — LibreOffice 重算验收(依赖 addr.json 寻址)。
 - `research/` — 研究层: dr_report(档案解析与依据回填) / consensus(一致预期文件) / announcements(东财公告) / llm(本机CLI备忘录) / sheets(两个研究页)。
-- `configs/` — 个股配置(300476=完整手工范例, 002463=全自动范例)。
+- `web/` — Web 模式: `server.py`(FastAPI, 任务落盘 web/.data/, worker 子进程调 build_model.py) + `static/index.html`(零构建单页)。
+- `configs/` — 个股配置(300476=完整手工范例, 002463=全自动范例, 00981=港股HKF10范例)。
 - `examples/` — 成稿 xlsx + 验收日志 + research fixture; `tests/smoke_check.py` 离线冒烟。
+- `Dockerfile` / `.dockerignore` — 一体化镜像(Web 服务 + LibreOffice 验收 + curl 数据层)。
 - 关键行号/地址不落盘硬编码在文档里 —— 全部经 addr.json 传递。
 
 ## 常用命令
@@ -34,6 +38,8 @@ python verify_model.py --code 300476                # LO重算验收
 python build_model.py --code 300476 --dr examples/research/dr_300476.md \
     --consensus examples/research/consensus_300476.json --announcements --llm off   # 研究层全开
 python tests/smoke_check.py out/300476_胜宏科技_估值模型.xlsx   # 无LibreOffice环境的冒烟
+python fetch_data.py --code 00981                   # 港股: 腾讯hk行情+东财HKF10 → configs/00981.yaml
+python -m web.server                                # Web模式 http://127.0.0.1:8000
 ```
 
 ## 工程约定
