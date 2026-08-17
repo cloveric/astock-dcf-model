@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Syntax check
+        run: python -m py_compile build_model.py fetch_data.py verify_model.py research/*.py tests/*.py
+      - name: Build from in-repo fixture config (offline)
+        run: python build_model.py --config configs/300476.yaml --out ci_model.xlsx --addr ci_model.addr.json
+      - name: Smoke check (structure / named ranges / Checks rows)
+        run: python tests/smoke_check.py ci_model.xlsx ci_model.addr.json
+      - name: Idempotency (two builds identical)
+        run: |
+          python build_model.py --config configs/300476.yaml --out ci_a.xlsx --addr ci_a.json
+          python build_model.py --config configs/300476.yaml --out ci_b.xlsx --addr ci_b.json
+          python - <<'EOF'
+          from openpyxl import load_workbook
+          def sig(p):
+              wb = load_workbook(p)
+              out = []
+              for s in wb.sheetnames:
+                  for row in wb[s].iter_rows():
+                      for c in row:
+                          if c.value is not None:
+                              out.append(f'{s}!{c.coordinate}={c.value}')
+              return out
+          assert sig('ci_a.xlsx') == sig('ci_b.xlsx'), 'non-deterministic build'
+          print('idempotent: OK')
+          EOF
+      - name: LibreOffice recalc + full verify (if soffice available)
+        run: |
+          sudo apt-get install -y libreoffice-calc >/dev/null 2>&1 || true
+          if command -v soffice >/dev/null; then
+            python verify_model.py ci_model.xlsx --addr ci_model.addr.json --workdir .cache/lo_ci
+          else
+            echo "soffice unavailable, skipped (offline smoke already passed)"
+          fi
