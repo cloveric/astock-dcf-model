@@ -18,14 +18,14 @@
   "valuation_date": "2026-08-17",
   "research_sheets": []
  },
- "dcf_ps": "DCF!D25",
- "dcf_upside": "DCF!D27",
+ "dcf_ps": "DCF!D26",
+ "dcf_upside": "DCF!D28",
  "dcf_ev": "DCF!D18",
- "dcf_eq": "DCF!D24",
- "fcfe_ps": "FCFE!D18",
- "fcfe_eq": "FCFE!D17",
- "fcfe_fcff_ps": "FCFE!D19",
- "fcfe_diff": "FCFE!D20",
+ "dcf_eq": "DCF!D25",
+ "fcfe_ps": "FCFE!D20",
+ "fcfe_eq": "FCFE!D19",
+ "fcfe_fcff_ps": "FCFE!D21",
+ "fcfe_diff": "FCFE!D22",
  "named_ranges": {
   "SCEN_SWITCH": "Assumptions!$C$5",
   "WACC_USED": "Assumptions!$C$82",
@@ -40,8 +40,8 @@
   "PAYOUT_Y1": "Assumptions!$C$53",
   "MIN_CASH_PCT": "Assumptions!$C$57",
   "SHARES_DIL": "Equity_Roll!$C$21",
-  "DCF_PS": "DCF!$D$25",
-  "FCFE_PS": "FCFE!$D$18"
+  "DCF_PS": "DCF!$D$26",
+  "FCFE_PS": "FCFE!$D$20"
  },
  "bs_chk_row": 47,
  "checks_sum": "Checks!F24",
