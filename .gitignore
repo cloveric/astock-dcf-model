@@ -3,6 +3,8 @@ out/
 .cache/
 __pycache__/
 *.pyc
+web/.data/
+.venv/
 
 # 模型产物默认不入库 (examples/ 下的样例除外)
 *.xlsx

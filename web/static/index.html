@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>astock-dcf-model — 估值模型构建台</title>
+<style>
+  :root { --ink:#1a1a1a; --navy:#1F3864; --line:#d9d9d9; --grey:#7f7f7f; --bg:#f7f8fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.6 "Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+         color:var(--ink); background:var(--bg); }
+  header { background:var(--navy); color:#fff; padding:18px 32px; }
+  header h1 { margin:0; font-size:18px; font-weight:600; letter-spacing:.5px; }
+  header p { margin:4px 0 0; font-size:12px; color:#c9d4e8; }
+  main { max-width:1080px; margin:24px auto; padding:0 20px; }
+  section { background:#fff; border:1px solid var(--line); border-radius:4px;
+            padding:20px 24px; margin-bottom:20px; }
+  h2 { margin:0 0 14px; font-size:15px; color:var(--navy); border-left:3px solid var(--navy);
+       padding-left:8px; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px 20px; }
+  label { display:block; font-size:12px; color:var(--grey); margin-bottom:3px; }
+  input[type=text], select { width:100%; padding:7px 9px; border:1px solid var(--line);
+    border-radius:3px; font:inherit; background:#fff; }
+  input:focus, select:focus { outline:none; border-color:var(--navy); }
+  .chk { display:flex; align-items:center; gap:7px; padding-top:20px; font-size:13px; }
+  button { background:var(--navy); color:#fff; border:0; border-radius:3px; padding:9px 26px;
+           font:inherit; cursor:pointer; }
+  button:hover { background:#2a4a80; }
+  button:disabled { background:#9aa7bd; cursor:default; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--grey); font-weight:500; font-size:12px; }
+  .st { font-weight:600; }
+  .st-queued { color:#8a6d1a; } .st-running { color:#1F3864; }
+  .st-done { color:#1e7a1e; } .st-failed { color:#cc0000; }
+  a.dl { color:var(--navy); text-decoration:none; border:1px solid var(--navy);
+         border-radius:3px; padding:3px 12px; font-size:12px; }
+  a.dl:hover { background:var(--navy); color:#fff; }
+  pre { background:#101522; color:#c8d3e8; font:12px/1.5 Menlo,Consolas,monospace;
+        padding:12px 14px; border-radius:4px; overflow:auto; max-height:280px;
+        white-space:pre-wrap; word-break:break-all; }
+  .muted { color:var(--grey); font-size:12px; }
+  .err { color:#cc0000; font-size:12px; margin-top:6px; }
+  .row { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-top:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>astock-dcf-model</h1>
+  <p>配置驱动的 A 股 / 港股三表联动估值模型生成器 · DCF + FCFE 双视图 · Checks 12 项机器验收</p>
+</header>
+<main>
+  <section>
+    <h2>提交建模任务</h2>
+    <div class="grid">
+      <div>
+        <label>证券代码 (6位A股 / 5位港股, 必填)</label>
+        <input type="text" id="code" maxlength="6" placeholder="300476 / 00981">
+      </div>
+      <div>
+        <label>配置文件 (可选, 仓库内路径; 缺省读 configs/&lt;code&gt;.yaml, 无则自动兜底)</label>
+        <input type="text" id="config" placeholder="configs/300476.yaml">
+      </div>
+      <div>
+        <label>研究层: dr 档案 (可选)</label>
+        <input type="text" id="dr" placeholder="examples/research/dr_300476.md">
+      </div>
+      <div>
+        <label>研究层: 一致预期文件 (可选)</label>
+        <input type="text" id="consensus" placeholder="examples/research/consensus_300476.json">
+      </div>
+      <div>
+        <label>研究层: LLM 备忘录</label>
+        <select id="llm">
+          <option value="off" selected>off (默认)</option>
+          <option value="auto">auto</option>
+          <option value="claude">claude</option>
+          <option value="codex">codex</option>
+        </select>
+      </div>
+      <div class="chk">
+        <input type="checkbox" id="announcements">
+        <label for="announcements" style="margin:0">抓取东财业绩预告/快报要点</label>
+      </div>
+    </div>
+    <div class="row">
+      <span class="muted">任务由 build_model.py 子进程串行执行; 历史三表缺失的标的自动走数据层兜底。</span>
+      <button id="submit">提交任务</button>
+    </div>
+    <div class="err" id="formErr"></div>
+  </section>
+
+  <section>
+    <h2>任务列表</h2>
+    <table>
+      <thead><tr>
+        <th>ID</th><th>代码</th><th>名称</th><th>状态</th><th>创建时间</th><th>完成时间</th><th>操作</th>
+      </tr></thead>
+      <tbody id="jobs"><tr><td colspan="7" class="muted">暂无任务</td></tr></tbody>
+    </table>
+    <div id="detail"></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const ST = {queued:'排队中', running:'构建中', done:'完成', failed:'失败'};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let msg = r.status + ' ' + r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+async function submit() {
+  $('formErr').textContent = '';
+  const body = {
+    code: $('code').value.trim(),
+    config: $('config').value.trim() || null,
+    dr: $('dr').value.trim() || null,
+    consensus: $('consensus').value.trim() || null,
+    llm: $('llm').value,
+    announcements: $('announcements').checked,
+  };
+  if (!/^\d{5,6}$/.test(body.code)) { $('formErr').textContent = '代码须为6位A股或5位港股数字'; return; }
+  $('submit').disabled = true;
+  try { await api('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+  catch (e) { $('formErr').textContent = e.message; }
+  finally { $('submit').disabled = false; }
+  refresh();
+}
+
+async function showDetail(id) {
+  const d = await api('/api/jobs/' + id);
+  let html = '<h2 style="margin-top:18px">任务 ' + d.id + ' 详情</h2>';
+  const ps = Object.entries(d.params || {}).map(([k,v]) => k + '=' + v).join('  ');
+  html += '<p class="muted">' + (ps || '默认参数') + '</p>';
+  if (d.error) html += '<p class="err">' + d.error + '</p>';
+  if (d.log_tail) html += '<pre>' + d.log_tail.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>';
+  $('detail').innerHTML = html;
+}
+
+async function refresh() {
+  let jobs;
+  try { jobs = await api('/api/jobs'); } catch (e) { return; }
+  const tb = $('jobs');
+  if (!jobs.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无任务</td></tr>'; return; }
+  tb.innerHTML = jobs.map(j => {
+    const act = j.status === 'done' && j.has_xlsx
+      ? '<a class="dl" href="/api/jobs/' + j.id + '/download">下载 xlsx</a>' : '';
+    return '<tr><td><a href="javascript:showDetail(\'' + j.id + '\')">' + j.id + '</a></td>' +
+      '<td>' + j.code + '</td><td>' + (j.name || '') + '</td>' +
+      '<td class="st st-' + j.status + '">' + (ST[j.status] || j.status) + '</td>' +
+      '<td>' + (j.created_at || '') + '</td><td>' + (j.finished_at || '—') + '</td>' +
+      '<td>' + act + '</td></tr>';
+  }).join('');
+}
+
+$('submit').addEventListener('click', submit);
+$('code').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
