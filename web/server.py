@@ -7,21 +7,26 @@ Web 服务模式: FastAPI + 单页前端 (web/static/index.html, 零构建)
     uvicorn web.server:app --port 8000
 
 接口:
-    POST /api/jobs                 提交建模任务 {code, config?, dr?, consensus?, announcements?, llm?}
-    GET  /api/jobs                 历史任务列表 (按创建时间倒序)
-    GET  /api/jobs/{id}            任务详情 (状态/日志尾部/产物路径)
-    GET  /api/jobs/{id}/download   下载 xlsx 产物
+    POST   /api/jobs                 提交建模任务 {code, config?, dr?, consensus?, announcements?, llm?}
+    GET    /api/jobs                 历史任务列表 (按创建时间倒序, 最多保留100个)
+    GET    /api/jobs/{id}            任务详情 (状态/日志尾部/验收摘要)
+    GET    /api/jobs/{id}/download   下载 xlsx 产物
+    DELETE /api/jobs/{id}            删除任务并清理产物 (进行中任务拒绝)
 
 实现要点:
   - 建模逻辑完全复用 build_model.py (子进程调用, 不重写); 单 worker 线程串行执行;
   - 任务状态落盘 web/.data/jobs.json (原子写), xlsx/addr/日志存 web/.data/out/<job_id>/;
   - 服务重启时, 此前 running/queued 的任务标记为 failed(中断);
-  - config/dr/consensus 仅接受仓库内已存在的文件路径, 防路径穿越。
+  - config/dr/consensus 仅接受仓库内已存在的文件路径, 防路径穿越;
+  - 任务保留上限 MAX_JOBS=100, 超限时淘汰最早完成的任务并同步清理产物目录;
+  - 构建成功后若本机有 LibreOffice 自动附跑 verify_model.py, 摘要随详情返回;
+  - 无鉴权: 仅绑定可信网络/本机使用, 公网暴露前须自行加反向代理鉴权。
 """
 import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -43,6 +48,7 @@ STATIC_DIR = os.path.join(WEB_DIR, 'static')
 
 CODE_RE = re.compile(r'^\d{5,6}$')          # 6位A股 或 5位港股
 VALID_LLM = {'off', 'auto', 'claude', 'codex'}
+MAX_JOBS = 100                              # 任务保留上限, 超限淘汰最早完成的任务(含产物)
 
 _lock = threading.Lock()
 _jobs = {}                                   # id -> job dict
@@ -92,6 +98,46 @@ def _read_log(job, tail=4000):
     return ''
 
 
+def _job_dir(jid):
+    return os.path.join(OUT_DIR, jid)
+
+
+def _drop_job(jid):
+    """移除任务记录并同步清理产物目录 (调用方须持锁)"""
+    if _jobs.pop(jid, None) is not None:
+        shutil.rmtree(_job_dir(jid), ignore_errors=True)
+
+
+def _enforce_retention():
+    """任务总数超MAX_JOBS时, 淘汰最早完成的任务(产物目录一并删除); 进行中任务不淘汰 (调用方须持锁)"""
+    while len(_jobs) > MAX_JOBS:
+        finished = [j for j in _jobs.values() if j['status'] in ('done', 'failed')]
+        if not finished:
+            break
+        victim = min(finished, key=lambda j: j['finished_at'] or j['created_at'])
+        _drop_job(victim['id'])
+
+
+def _run_verify(xlsx, addr, log_file):
+    """构建成功后附跑LibreOffice重算验收; 本机无soffice时跳过并说明. 返回摘要文本"""
+    if not shutil.which('soffice'):
+        return '本机未检测到LibreOffice(soffice), 跳过自动验收; 可手工执行: python verify_model.py <xlsx>'
+    try:
+        proc = subprocess.run([sys.executable, os.path.join(REPO_ROOT, 'verify_model.py'),
+                               xlsx, '--addr', addr,
+                               '--workdir', os.path.join(os.path.dirname(xlsx), '.lo')],
+                              cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
+        tail = ((proc.stdout or '') + (proc.stderr or ''))[-2000:]
+    except Exception as e:
+        tail = f'验收执行失败: {type(e).__name__}: {e}'
+    try:
+        with open(log_file, 'a', encoding='utf-8') as lf:
+            lf.write('\n$ verify_model.py (自动验收)\n' + tail + '\n')
+    except Exception:
+        pass
+    return tail
+
+
 def _run_job(job):
     jid = job['id']
     job_dir = os.path.join(OUT_DIR, jid)
@@ -126,10 +172,12 @@ def _run_job(job):
                 name = meta.get('name', name)
             except Exception:
                 pass
+            verify_tail = _run_verify(xlsx, addr, log_file)
             with _lock:
                 job['status'] = 'done'
                 job['name'] = name
                 job['xlsx'] = xlsx
+                job['verify_tail'] = verify_tail
                 job['finished_at'] = _now()
                 _save()
         else:
@@ -172,6 +220,8 @@ def _public(job, with_log=False):
     d['has_xlsx'] = bool(job.get('xlsx') and os.path.exists(job['xlsx']))
     if with_log:
         d['log_tail'] = _read_log(job)
+        if job.get('verify_tail'):
+            d['verify_tail'] = job['verify_tail']
     return d
 
 
@@ -200,6 +250,7 @@ def create_app():
                'xlsx': None, 'log_file': None}
         with _lock:
             _jobs[job['id']] = job
+            _enforce_retention()
             _save()
         _queue.put(job['id'])
         return _public(job)
@@ -216,6 +267,18 @@ def create_app():
         if not job:
             raise HTTPException(404, '任务不存在')
         return _public(job, with_log=True)
+
+    @app.delete('/api/jobs/{jid}')
+    def delete_job(jid: str):
+        with _lock:
+            job = _jobs.get(jid)
+            if not job:
+                raise HTTPException(404, '任务不存在')
+            if job['status'] in ('queued', 'running'):
+                raise HTTPException(409, '任务进行中, 不可删除')
+            _drop_job(jid)
+            _save()
+        return {'deleted': jid}
 
     @app.get('/api/jobs/{jid}/download')
     def download(jid: str):

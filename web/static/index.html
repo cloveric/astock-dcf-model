@@ -104,6 +104,8 @@
 <script>
 const $ = id => document.getElementById(id);
 const ST = {queued:'排队中', running:'构建中', done:'完成', failed:'失败'};
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+let detailId = null;   // 当前展开详情的任务; 进行中时随轮询自动刷新日志尾部
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -127,20 +129,40 @@ async function submit() {
   };
   if (!/^\d{5,6}$/.test(body.code)) { $('formErr').textContent = '代码须为6位A股或5位港股数字'; return; }
   $('submit').disabled = true;
-  try { await api('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+  try {
+    const j = await api('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    detailId = j.id;   // 新任务自动展开详情, 轮询跟踪日志
+  }
   catch (e) { $('formErr').textContent = e.message; }
   finally { $('submit').disabled = false; }
   refresh();
 }
 
 async function showDetail(id) {
-  const d = await api('/api/jobs/' + id);
-  let html = '<h2 style="margin-top:18px">任务 ' + d.id + ' 详情</h2>';
+  detailId = id;
+  await renderDetail();
+}
+
+async function renderDetail() {
+  if (!detailId) return;
+  let d;
+  try { d = await api('/api/jobs/' + detailId); }
+  catch (e) { detailId = null; $('detail').innerHTML = ''; return; }   // 任务已被淘汰/删除
+  let html = '<h2 style="margin-top:18px">任务 ' + esc(d.id) + ' 详情 (' + esc(ST[d.status] || d.status) + ')</h2>';
   const ps = Object.entries(d.params || {}).map(([k,v]) => k + '=' + v).join('  ');
-  html += '<p class="muted">' + (ps || '默认参数') + '</p>';
-  if (d.error) html += '<p class="err">' + d.error + '</p>';
-  if (d.log_tail) html += '<pre>' + d.log_tail.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>';
+  html += '<p class="muted">' + esc(ps || '默认参数') + '</p>';
+  if (d.error) html += '<p class="err">' + esc(d.error) + '</p>';
+  if (d.log_tail) html += '<pre>' + esc(d.log_tail) + '</pre>';
+  if (d.verify_tail) html += '<h2>LibreOffice 验收摘要</h2><pre>' + esc(d.verify_tail) + '</pre>';
   $('detail').innerHTML = html;
+}
+
+async function delJob(id) {
+  if (!confirm('删除任务 ' + id + ' 及其产物?')) return;
+  try { await api('/api/jobs/' + id, {method:'DELETE'}); }
+  catch (e) { alert(e.message); }
+  if (detailId === id) { detailId = null; $('detail').innerHTML = ''; }
+  refresh();
 }
 
 async function refresh() {
@@ -149,14 +171,26 @@ async function refresh() {
   const tb = $('jobs');
   if (!jobs.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无任务</td></tr>'; return; }
   tb.innerHTML = jobs.map(j => {
-    const act = j.status === 'done' && j.has_xlsx
-      ? '<a class="dl" href="/api/jobs/' + j.id + '/download">下载 xlsx</a>' : '';
-    return '<tr><td><a href="javascript:showDetail(\'' + j.id + '\')">' + j.id + '</a></td>' +
-      '<td>' + j.code + '</td><td>' + (j.name || '') + '</td>' +
-      '<td class="st st-' + j.status + '">' + (ST[j.status] || j.status) + '</td>' +
-      '<td>' + (j.created_at || '') + '</td><td>' + (j.finished_at || '—') + '</td>' +
+    let act = '';
+    if (j.status === 'done' && j.has_xlsx)
+      act += '<a class="dl" href="/api/jobs/' + encodeURIComponent(j.id) + '/download">下载 xlsx</a> ';
+    if (j.status === 'done' || j.status === 'failed')
+      act += '<a class="dl" href="javascript:delJob(\'' + esc(j.id) + '\')">删除</a>';
+    return '<tr><td><a href="javascript:showDetail(\'' + esc(j.id) + '\')">' + esc(j.id) + '</a></td>' +
+      '<td>' + esc(j.code) + '</td><td>' + esc(j.name || '') + '</td>' +
+      '<td class="st st-' + esc(j.status) + '">' + esc(ST[j.status] || j.status) + '</td>' +
+      '<td>' + esc(j.created_at || '') + '</td><td>' + esc(j.finished_at || '—') + '</td>' +
       '<td>' + act + '</td></tr>';
   }).join('');
+  // 进行中的任务: 日志尾部随轮询自动刷新展开; 无展开时自动展开首个进行中任务
+  const active = jobs.find(j => j.status === 'running' || j.status === 'queued');
+  if (detailId) {
+    const cur = jobs.find(j => j.id === detailId);
+    if (cur && (cur.status === 'running' || cur.status === 'queued')) await renderDetail();
+  } else if (active) {
+    detailId = active.id;
+    await renderDetail();
+  }
 }
 
 $('submit').addEventListener('click', submit);
