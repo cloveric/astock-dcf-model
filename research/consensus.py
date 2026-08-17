@@ -45,27 +45,32 @@ def load(path):
 
 
 def apply_to_cfg(raw, cons):
-    """用文件一致预期覆盖配置 consensus 段 (依据字段注明文件来源); 缺少年份保留原值"""
+    """用文件一致预期覆盖配置 consensus 段 (依据字段注明文件来源)
+
+    按年份对齐: 槽位 = 配置 model.fcst_years 前 3 个预测年, 只写文件中出现的年份,
+    缺年保留配置原值; 文件年份与预测序列完全无交集则报错 (防位置错位写错槽)。"""
     src = f"聚源/gildata一致预期文件({cons['source']}{', ' + cons['date'] if cons['date'] else ''})"
     node = raw.setdefault('consensus', {})
+    fcst = (raw.get('model') or {}).get('fcst_years') or []
+    slots = {int(y): i for i, y in enumerate(fcst[:3])}
 
     def _merge(key, series):
         if not series:
             return
+        hit = {y: v for y, v in series.items() if y in slots}
+        if not hit:
+            raise ValueError(
+                f'一致预期[{key}]年份{sorted(series)}与配置预测年前3年{sorted(slots)}无交集')
         ent = node.get(key) or {}
         vals = ent.get('values') or ent.get('value') or []
         if not isinstance(vals, list):
             vals = [vals]
-        years = sorted(series)
         out = list(vals)
-        for i, y in enumerate(years[:3]):
-            v = series[y]
-            if i < len(out):
-                out[i] = v
-            else:
-                out.append(v)
-        if not out:
-            out = [series[y] for y in years[:3]]
+        for y, v in sorted(hit.items()):
+            i = slots[y]
+            while len(out) <= i:            # 原配置缺槽位: 用末值(无则用本次给定值)顺延占位
+                out.append(out[-1] if out else v)
+            out[i] = v
         node[key] = {'values': out, 'basis': src}
 
     _merge('rev', cons['rev'])
