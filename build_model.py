@@ -1531,7 +1531,9 @@ def build(cfg, out_path, addr_path, research=None):
     dcell('tfa', f'加: 交易性金融资产({H0}A末)', f"={BSs}!{YC[H0]}{B['tfa']}")
     dcell('oei', f'加: 其他权益工具投资({H0}A末)', f"={BSs}!{YC[H0]}{B['oei']}", NUM, False, f"{H0}A末{_bs['oei'][-1]/100:.1f}亿, 参股投资按账面值计入股权价值")
     dcell('debt', f'减: 有息负债({H0}A末)', f"=-({BSs}!{YC[H0]}{B['stl']}+{BSs}!{YC[H0]}{B['cur1y']}+{BSs}!{YC[H0]}{B['ltl']}+{BSs}!{YC[H0]}{B['lease']})")
-    dcell('netadj', '净现金调整合计', f"=D{D['cash']}+D{D['tfa']}+D{D['oei']}+D{D['debt']}", NUM, False, '供Sensitivity/Scenarios页引用')
+    dcell('mi', f'减: 少数股东权益({H0}A末)', f"=-{BSs}!{YC[H0]}{B['mi']}", NUM, False,
+          'EV桥得归母口径股权价值须扣少数股东权益(账面值); 无少数股东权益的标的为0, 不影响结果')
+    dcell('netadj', '净现金调整合计', f"=D{D['cash']}+D{D['tfa']}+D{D['oei']}+D{D['debt']}+D{D['mi']}", NUM, False, '供Sensitivity/Scenarios页引用')
     dcell('eq', '股权价值', f"=D{D['ev']}+D{D['netadj']}", NUM, True)
     dcell('ps', '每股价值 (元)', f"=D{D['eq']}/{SH_REF}", PS, True, '=股权价值/稀释股数(Equity_Roll页)')
     dcell('px', f'现价 ({VAL_DATE})', f"={ASheet}!$C${A['px']}", PS)
@@ -1548,7 +1550,8 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('FCFE')
     title_bar(ws, f'{NAME} — FCFE 股权自由现金流估值 (Ke折现, 与FCFF双视图)',
-              f'单位: {UNIT} | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), 直接得股权价值, 无需EV→Equity桥')
+              f'单位: {UNIT} | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), '
+              '直接得归母股权价值(少数股东权益见DCF页EV→Equity桥); 终值取正常化FCFE(净新增借款按g封顶)')
     ws.column_dimensions['A'].width = 32
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1575,6 +1578,9 @@ def build(cfg, out_path, addr_path, research=None):
     erow('capex', '减: Capex', lambda y: f"={PPEs}!{YC[y]}{P['capex']}", NUM, False, '=PP&E页资本开支')
     erow('ddebt', '加: 净新增借款', lambda y: f"={FINs}!{YC[y]}{F['ddebt']}", NUM, False,
          '=FIN四档债务期末-期初(revolver新增-sweep偿还-计划还款); 股权口径下债务净变动归股东')
+    erow('wmm', '理财净变动(勾稽参考, 不计入FCFE)', lambda y: f"=-{FINs}!{YC[y]}{F['dtfa']}", NUM, False,
+         '=-FIN理财净变动: sweep溢出购买理财为现金↔理财的形态转换(资产仍在表内归属股东), 故不计入FCFE; '
+         '显性列示供FCFE↔FCFF差异勾稽(FCFF也未扣理财购买, 两法在此口径一致)')
     erow('fcfe', 'FCFE', lambda y: f"={YC[y]}{E['np']}+{YC[y]}{E['da']}-{YC[y]}{E['dnwc']}-{YC[y]}{E['capex']}+{YC[y]}{E['ddebt']}", NUM, True,
          '=归母+D&A-ΔNWC-Capex+净新增借款')
     erow('t_idx', '折现年序(年中)', lambda y: 0.5 + FCST.index(y), '0.0', False, '年中折现, 与DCF页同口径')
@@ -1591,8 +1597,12 @@ def build(cfg, out_path, addr_path, research=None):
         r += 1
 
     ecell('pv_sum', f'显性期PV合计 ({F0}-{F1})', f"=SUM({YC[F0]}{E['pv']}:{YC[F1]}{E['pv']})", NUM, True)
-    ecell('tv', '终值 TV (Gordon)', f"={YC[F1]}{E['fcfe']}*(1+TERM_G)/(KE-TERM_G)", NUM, False,
-          f'=FCFE{F1}×(1+g)/(Ke-g); Ke/g均为named range')
+    ecell('fcfe_n', f'正常化FCFE ({F1}E, 终值口径)',
+          f"={YC[F1]}{E['fcfe']}-{YC[F1]}{E['ddebt']}+MIN({YC[F1]}{E['ddebt']},{FINs}!{YC[F1]}{F['dtot1']}*TERM_G)",
+          NUM, False,
+          f'净新增借款按g封顶: 终值内净新增借款取MIN(实际调度, {F1}E期末有息负债×g), 防止显性期末大额净融资被Gordon公式永续外推; 去杠杆/平稳年(实际≤封顶值)维持实际调度不变')
+    ecell('tv', '终值 TV (Gordon, 正常化FCFE)', f"=D{E['fcfe_n']}*(1+TERM_G)/(KE-TERM_G)", NUM, False,
+          f'=正常化FCFE{F1}×(1+g)/(Ke-g); Ke/g均为named range')
     ecell('pv_tv', 'PV(终值)', f"=D{E['tv']}*{YC[F1]}{E['df']}", NUM, False, f'终值按t={NF-0.5}折现(与DCF页一致)')
     ecell('eq', '股权价值 (FCFE口径)', f"=D{E['pv_sum']}+D{E['pv_tv']}", NUM, True, 'FCFE直接折现为股权价值, 无需净现金桥')
     ecell('ps', '每股价值 (元)', f"=D{E['eq']}/SHARES_DIL", PS, True, '=股权价值/稀释股数(named range)')
@@ -1601,9 +1611,11 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '两法差异原因', 't', bold=True)
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
     put(ws, r, 2, '①折现率不同: FCFF按WACC(全资本成本, 税盾在分母)折现, FCFE按Ke(纯股权成本)折现; '
-                  '②口径不同: FCFF为企业自由现金流, 须经EV→Equity桥加回净现金/扣有息负债, FCFE已含净新增借款、直接对应股权; '
+                  '②口径不同: FCFF为企业自由现金流, 须经EV→Equity桥加回净现金/扣有息负债/扣少数股东权益, FCFE基于归母净利折现、'
+                  '直接对应归母股权价值, 少数股东权益已在DCF页EV→Equity桥扣除, 本页无需再扣; '
                   '③杠杆路径不同: FCFE逐年反映FIN页revolver/sweep实际债务调度(资本结构动态变化), FCFF隐含目标结构(Wd)恒定; '
-                  '④两法在"恒定资本结构+一致税盾处理"下理论等价, 实务差异主要来自债务调度时点、净现金桥与折现率差; 差异幅度大时应复查融资假设',
+                  '④理财净变动(上行勾稽参考行)为现金形态转换, 两法均未计入, 不构成差异来源; '
+                  '⑤两法在"恒定资本结构+一致税盾处理"下理论等价, 实务差异主要来自债务调度时点、净现金桥与折现率差; 差异幅度大时应复查融资假设',
         'g', size=9, wrap=True)
     ws.row_dimensions[r].height = 52
     r += 1
@@ -2186,7 +2198,7 @@ def build(cfg, out_path, addr_path, research=None):
         '2. 利息=四档债务各自(期初+期末)/2平均余额×分档利率; 该循环依赖已在FIN页"迭代展开"区表内展开4轮(与外部不动点法同构且实测6轮内收敛至1e-8, 4轮充足), 末轮输出供IS/CF/BS引用; 全簿无循环引用, 无需开启迭代计算, LibreOffice headless可直接重算验收;',
         '3. BS配平项由货币资金改为FIN页revolver新增借款/现金sweep; 历史尾差已并入"其他权益项目(轧差)"清零, 配平差额全期恒=0(容差0.01);',
         '4. WACC做实: 可比公司βl按各自D/E与税率unlever取中位数(Relative_Val页L-O列), 按公司市值口径目标结构relever; Wd=最近年报末有息负债/(有息负债+总市值); 采用值=IF(override="",计算值,override), 下游全部引用采用值;',
-        f'5. DCF年中折现: 估值基准日{VAL_DATE}, t=0.5/1.5/.../{NF-0.5}; EV→Equity桥含货币资金/交易性金融资产/其他权益工具投资/有息负债;',
+        f'5. DCF年中折现: 估值基准日{VAL_DATE}, t=0.5/1.5/.../{NF-0.5}; EV→Equity桥含货币资金/交易性金融资产/其他权益工具投资/有息负债/少数股东权益;',
         '6. CF口径: 利息支出经营活动加回、筹资活动列"偿付利息"; 投资活动含"理财净变动"行;',
         '7. 权益滚动: Equity_Roll页逐项滚动, 盈余公积按归母计提; 稀释股数=总股本+稀释工具占位; Summary页为football field区间汇总;',
         '8. 预测期资产减值/投资收益等非经常项简化为固定小额(Assumptions"其他经营损益"), 以保证三表严格配平;',
@@ -2281,11 +2293,12 @@ def build(cfg, out_path, addr_path, research=None):
     for _n, _ref in NAMED_RANGES.items():
         wb.defined_names[_n] = DefinedName(_n, attr_text=_ref)
 
-    # ---------- 工作表顺序 ----------
+    # ---------- 工作表顺序 (公开API move_sheet 重排) ----------
     ORDER = ['Cover', 'Summary', 'Assumptions', 'Revenue_Segments', 'IS', 'BS', 'CF',
              'Schedules', 'PPE', 'FIN', 'Equity_Roll', 'DCF', 'FCFE', 'Relative_Val',
              'Sensitivity', 'Scenarios', 'Checks'] + EXTRA_SHEETS
-    wb._sheets = [wb[n] for n in ORDER]
+    for _i, _n in enumerate(ORDER):
+        wb.move_sheet(_n, offset=_i - wb.sheetnames.index(_n))
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     wb.save(out_path)

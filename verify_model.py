@@ -7,7 +7,8 @@
   python verify_model.py out/300476_胜宏科技_估值模型.xlsx
   python verify_model.py <xlsx> --no-recalc            # 直接读已重算文件
 校验项: Checks布尔总闸 / BS配平 / 现金=最低现金 / FIN迭代残差 / CF-BS现金勾稽 /
-        WACC采用值=计算值 / 年中折现t序 / 基准情景=主模型 / 敏感性矩阵中心=DCF。
+        WACC采用值=计算值 / 年中折现t序 / 基准情景=主模型 / 敏感性矩阵中心=DCF /
+        黄金值断言(基准标的DCF每股精确复现, 容差0, 见GOLDEN_DCF_PS)。
 """
 import argparse
 import json
@@ -17,6 +18,10 @@ import subprocess
 import sys
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+# 黄金值 (容差0): 基准标的构建后DCF每股必须精确复现, 防回归
+GOLDEN_DCF_PS = {'300476': 340.415208186145}
 
 
 def lo_recalc(src, workdir):
@@ -54,7 +59,7 @@ def main():
     meta = addr.get('meta', {})
     YRS = meta.get('hist_years', [2023, 2024, 2025]) + meta.get('fcst_years', [2026, 2027, 2028, 2029, 2030])
     FCST = meta.get('fcst_years', YRS[-5:])
-    COLS = {y: chr(ord('B') + i) for i, y in enumerate(YRS)}
+    COLS = {y: get_column_letter(2 + i) for i, y in enumerate(YRS)}
 
     if args.no_recalc:
         recalced = path
@@ -136,6 +141,9 @@ def main():
     ev = V('DCF', addr['dcf_ev'].split('!')[1]); eq = V('DCF', addr['dcf_eq'].split('!')[1])
     ps = V('DCF', addr['dcf_ps'].split('!')[1]); up = V('DCF', addr['dcf_upside'].split('!')[1])
     print(f'  EV={fmt(ev)}  股权价值={fmt(eq)}  每股价值={ps:.4f}元  隐含涨跌幅={up:+.1%}')
+    golden = GOLDEN_DCF_PS.get(str(meta.get('code')))
+    if golden is not None:
+        check('黄金值: DCF每股精确复现(容差0)', ps == golden, f'{ps!r} vs 基准{golden!r}')
     tidx = [V('DCF', f'{COLS[y]}11') for y in FCST]
     check('年中折现t=0.5..4.5', all(isinstance(v, (int, float)) and abs(v - (0.5 + i)) < 1e-9
                                   for i, v in enumerate(tidx)), str(tidx))
