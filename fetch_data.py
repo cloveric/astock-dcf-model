@@ -3,13 +3,16 @@
 通用数据获取层 + 兜底配置生成 (fetch_data.py)
 
 数据源纪律:
-  - 东财F10 (三表/主营构成): 一律走系统 curl 子进程 (python 不直连东财, 避免反爬)
-  - 腾讯行情 (现价/总市值/PE-TTM): 系统 curl qt.gtimg.cn
+  - 东财F10 (A股三表/主营构成): 一律走系统 curl 子进程 (python 不直连东财, 避免反爬)
+  - 东财HKF10 (港股三表, datacenter长表接口): 同样系统curl; IFRS科目映射, 金额为财报
+    币种(如中芯国际=美元); 现金流量表仅人民币口径, 按"期末现金/BS现金"隐含汇率折算
+  - 腾讯行情 (现价/总市值/PE-TTM): 系统 curl qt.gtimg.cn; A股与港股hkXXXXX同版式
   - gildata/聚源一致预期: 本工具不直连; 由用户手工填入 configs/<code>.yaml 的
     consensus 段 (有 MCP 环境时可查后回填), 缺省时用"自动推导"占位并在依据中注明
 
 用法:
   python fetch_data.py --code 002463                 # 拉取公开数据 → configs/002463.yaml
+  python fetch_data.py --code 00981                  # 港股: 腾讯hk行情+东财HKF10 → configs/00981.yaml
   python fetch_data.py --code 002463 --stdout        # 打印生成的配置而不写文件
   python fetch_data.py --code 002463 --quote-only    # 只打印行情快照
 
@@ -54,13 +57,23 @@ def em_code(code):
     raise ValueError(f'无法识别交易所: {code}')
 
 
+def is_hk(code):
+    """5位数字 = 港股代码 (如 00981)"""
+    return bool(re.fullmatch(r'\d{5}', str(code).strip()))
+
+
 def tx_code(code):
-    """6位代码 → 腾讯行情代码 (小写)"""
+    """证券代码 → 腾讯行情代码 (小写; 港股为 hkXXXXX)"""
+    code = str(code).strip()
+    if is_hk(code):
+        return f'hk{code}'
     return em_code(code).lower()
 
 
 def fetch_quote(code):
-    """腾讯行情快照: 现价/总市值(亿)/PE-TTM/名称"""
+    """腾讯行情快照: 现价/总市值(亿)/PE-TTM/名称
+    A股(sh/sz/bj)与港股(hkXXXXX)版式的关键字段位置一致: f[3]现价 f[39]PE-TTM f[45]总市值(亿);
+    港股现价/总市值为港元口径 (实测 00981/00700 字段对齐)"""
     raw = curl_get(f'https://qt.gtimg.cn/q={tx_code(code)}', referer='https://gu.qq.com/')
     txt = raw.decode('gbk', errors='replace')
     m = re.search(r'="(.*)"', txt)
@@ -69,11 +82,14 @@ def fetch_quote(code):
     f = m.group(1).split('~')
     price = float(f[3])
     pe_ttm = float(f[39])
-    mcap_yi = float(f[45])          # 总市值, 亿元
+    mcap_yi = float(f[45])          # 总市值, 亿元(A股) / 亿港元(港股)
     name = f[1]
     shares_m = round(mcap_yi * 100 / price, 1)   # 总股本(百万股) = 市值/价
-    return {'name': name, 'price': price, 'pe_ttm': pe_ttm,
-            'mcap_yi': mcap_yi, 'shares_m': shares_m}
+    out = {'name': name, 'price': price, 'pe_ttm': pe_ttm,
+           'mcap_yi': mcap_yi, 'shares_m': shares_m}
+    if is_hk(code):
+        out['quote_ccy'] = '港元'
+    return out
 
 
 def _dates_param(years):
@@ -110,6 +126,222 @@ def fetch_composition(code):
     for y in out:
         out[y].sort(key=lambda r: r.get('RANK') or 99)
     return out
+
+
+# ============================================================
+# 港股 (5位代码): 东财HKF10(datacenter API, 系统curl) + 腾讯hk行情
+#   - 三表为 IFRS 科目、财报币种(如中芯国际=美元); 现金流量表为人民币口径,
+#     按"CF期末现金/BS现金及等价物"的隐含汇率逐年折算回财报币种(依据注明);
+#   - 无东财"主营构成(按产品)"披露 → 单段简化收入驱动;
+#   - IFRS 无税金及附加/法定盈余公积等科目 → 置0并在依据注明。
+# ============================================================
+
+def fetch_hk_long_table(rpt, code, item_key):
+    """东财HKF10长表 → {year: {科目: 金额}} (仅年报 DATE_TYPE_CODE=001)"""
+    url = (f'https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName={rpt}'
+           f'&columns=ALL&filter=(SECUCODE%3D%22{code}.HK%22)&pageNumber=1&pageSize=500'
+           '&sortTypes=-1&sortColumns=REPORT_DATE&source=HSF10&client=PC')
+    data = json.loads(curl_get(url, referer='https://data.eastmoney.com/'))['result']['data']
+    out, ccy = {}, None
+    for row in data:
+        if row.get('DATE_TYPE_CODE') != '001':
+            continue
+        y = int(row['REPORT_DATE'][:4])
+        out.setdefault(y, {})[row[item_key]] = row['AMOUNT']
+        ccy = ccy or row.get('CURRENCY')
+    return out, ccy
+
+
+def build_hist_hk(code, years):
+    """东财HKF10三表 → 模型 hist 结构 (单位: 财报币种百万, IFRS科目映射)"""
+    inc, ccy = fetch_hk_long_table('RPT_HKF10_FN_INCOME', code, 'ITEM_NAME')
+    bal, _ = fetch_hk_long_table('RPT_HKF10_FN_BALANCE', code, 'ITEM_NAME')
+    cfs, _ = fetch_hk_long_table('RPT_HKF10_FN_CASHFLOW_PC', code, 'STD_ITEM_NAME')
+    missing = [y for y in years if y not in inc or y not in bal or y not in cfs]
+    if missing:
+        raise RuntimeError(f'HKF10 缺少年报: {missing}')
+
+    def m(v, nd=1):
+        return 0.0 if v is None else round(v / 1e6, nd)
+
+    is_d = {k: [] for k in ('rev', 'cost', 'taxadd', 'sale', 'adm', 'rd', 'fin',
+                            'othop', 'nonop', 'taxexp', 'np_p')}
+    bs_d = {k: [] for k in ('cash', 'tfa', 'ar', 'pre', 'orec', 'inv', 'oca', 'ppe', 'rou',
+                            'ia', 'gw', 'lpe', 'dta', 'oei', 'onca', 'stl', 'ap', 'contract',
+                            'staff', 'taxp', 'opay', 'cur1y', 'ocl', 'ltl', 'lease', 'oncl',
+                            'sc', 'cr', 'ts', 'oci', 'sr', 're', 'oeq', 'mi')}
+    cf_d = {k: [] for k in ('np', 'da', 'ocf', 'capex', 'icf', 'fcf', 'cash1')}
+    for y in sorted(years):
+        L, B = inc[y], bal[y]
+
+        def li(k):
+            return L.get(k) or 0.0
+
+        def bi(k):
+            return B.get(k) or 0.0
+
+        rev, cost = li('营业额'), li('销售成本')
+        sale, adm, rd = li('销售及分销费用'), li('行政开支'), li('研发费用')
+        fin = li('融资成本') - li('利息收入')          # 净融资成本 (IFRS口径)
+        op, tp = li('经营溢利'), li('除税前溢利')
+        is_d['rev'].append(m(rev)); is_d['cost'].append(m(cost))
+        is_d['taxadd'].append(0.0)                    # IFRS无"税金及附加"科目
+        is_d['sale'].append(m(sale)); is_d['adm'].append(m(adm)); is_d['rd'].append(m(rd))
+        is_d['fin'].append(m(fin))
+        is_d['othop'].append(m(op - (rev - cost - sale - adm - rd - fin)))   # 轧差(含其他收入/应占联营)
+        is_d['nonop'].append(m(tp - op))
+        is_d['taxexp'].append(m(li('税项')))
+        is_d['np_p'].append(m(li('股东应占溢利')))
+
+        cash = bi('现金及等价物')
+        tfa = bi('短期投资') + bi('指定以公允价值记账之金融资产(流动)')
+        ar, pre, inv = bi('应收帐款'), bi('预付款按金及其他应收款'), bi('存货')
+        tca = bi('流动资产合计')
+        ppe, ia = bi('物业厂房及设备'), bi('无形资产')
+        dta, oei = bi('递延税项资产'), bi('长期投资')
+        tnca = bi('非流动资产合计')
+        stl, ap = bi('短期贷款'), bi('应付帐款')
+        contract = bi('合同负债') + bi('预收款项')
+        taxp, cur1y = bi('应付税项'), bi('融资租赁负债(流动)')
+        tcl = bi('流动负债合计')
+        ltl, lease = bi('长期贷款'), bi('融资租赁负债(非流动)')
+        tncl = bi('非流动负债合计')
+        sc, cr, oci = bi('股本'), bi('股本溢价'), bi('其他储备')
+        re_ = bi('保留溢利(累计亏损)')
+        tpe = bi('股东权益')
+        bs_d['cash'].append(m(cash)); bs_d['tfa'].append(m(tfa))
+        bs_d['ar'].append(m(ar)); bs_d['pre'].append(m(pre)); bs_d['orec'].append(0.0)
+        bs_d['inv'].append(m(inv))
+        bs_d['oca'].append(m(tca - cash - tfa - ar - pre - inv))     # 轧差
+        bs_d['ppe'].append(m(ppe)); bs_d['rou'].append(0.0)          # IFRS使用权资产未单列
+        bs_d['ia'].append(m(ia)); bs_d['gw'].append(0.0); bs_d['lpe'].append(0.0)
+        bs_d['dta'].append(m(dta)); bs_d['oei'].append(m(oei))
+        bs_d['onca'].append(m(tnca - ppe - ia - dta - oei))          # 轧差(含联营公司权益)
+        bs_d['stl'].append(m(stl)); bs_d['ap'].append(m(ap))
+        bs_d['contract'].append(m(contract)); bs_d['staff'].append(0.0)
+        bs_d['taxp'].append(m(taxp)); bs_d['opay'].append(0.0)
+        bs_d['cur1y'].append(m(cur1y))
+        bs_d['ocl'].append(m(tcl - stl - ap - contract - taxp - cur1y))   # 轧差
+        bs_d['ltl'].append(m(ltl)); bs_d['lease'].append(m(lease))
+        bs_d['oncl'].append(m(tncl - ltl - lease))                   # 轧差(含递延收入/递延税项负债)
+        bs_d['sc'].append(m(sc)); bs_d['cr'].append(m(cr)); bs_d['ts'].append(0.0)
+        bs_d['oci'].append(m(oci)); bs_d['sr'].append(0.0)           # IFRS无法定盈余公积
+        bs_d['re'].append(m(re_))
+        bs_d['oeq'].append(m(tpe - sc - cr - oci - re_))             # 轧差
+        bs_d['mi'].append(m(bi('少数股东权益')))
+
+        C = cfs[y]
+        # 现金流表为人民币口径 → 按隐含汇率(期末现金/BS现金)折算回财报币种
+        fx = (C.get('期末现金') or 0.0) / cash if cash else 1.0
+        if abs(fx - 1.0) < 0.05:
+            fx = 1.0
+
+        def ci(k):
+            return (C.get(k) or 0.0) / fx
+
+        cf_d['np'].append(is_d['np_p'][-1])
+        cf_d['da'].append(m(ci('加:折旧及摊销')))
+        cf_d['ocf'].append(m(ci('经营业务现金净额')))
+        cf_d['capex'].append(m(-(ci('购建固定资产') + ci('购建无形资产及其他资产'))))
+        cf_d['icf'].append(m(ci('投资业务现金净额')))
+        cf_d['fcf'].append(m(ci('融资业务现金净额')))
+        cf_d['cash1'].append(m(ci('期末现金')))       # = BS现金及等价物 (隐含汇率口径)
+    y0 = sorted(years)[-1]
+    ppe_split = {'fa_net': m(bal[y0].get('物业厂房及设备')),
+                 'cip': 0.0}                            # HKF10未拆分在建工程
+    return {'is': is_d, 'bs': bs_d, 'cf': cf_d, 'ppe_split': ppe_split,
+            'currency': ccy or '美元', 'cf_fx_note': '现金流量表(人民币口径)按隐含汇率折算'}
+
+
+def build_segments_hk(hist, years):
+    """港股无东财主营构成披露 → 单段(整体)简化: 增速=总收入YoY退坡, 毛利率=历史实际"""
+    rev = hist['is']['rev']
+    gm = []
+    for i, y in enumerate(sorted(years)):
+        g = (rev[i] - hist['is']['cost'][i]) / rev[i] if rev[i] else 0.30
+        gm.append(round(g, 4))
+    gy = rev[-1] / rev[-2] - 1 if len(rev) >= 2 and rev[-2] else 0.10
+    g0 = min(max(gy, -0.15), 0.35)
+    growth = [round(g0 * f, 4) for f in (1.0, 0.75, 0.55, 0.40, 0.30)]
+    return [{
+        'key': 'seg1', 'name': '整体业务(单段简化)', 'short': '整体', 'driver': 'growth',
+        'hist_share': [1.0] * len(years), 'hist_gm': gm,
+        'share_basis': '港股无东财主营构成(按产品)披露, 单段=总收入100%',
+        'vol': {'values': growth,
+                'basis': f'自动推导: 最近年报总收入YoY={gy:+.1%}(截断[-15%,35%])逐年退坡×1/.75/.55/.40/.30; 建议按研究修正'},
+        'gm': {'values': [gm[-1]] * 5,
+               'basis': f'自动推导: 最近年报综合毛利率{gm[-1]:.1%}持平; 建议按研究修正'},
+        'logic': '港股单段简化(东财HKF10无主营构成披露); 历史毛利率=1-销售成本/营业额(IFRS)',
+    }]
+
+
+def build_fallback_config_hk(code):
+    """港股全自动兜底: 腾讯hk行情 + 东财HKF10三表(IFRS) → 完整配置dict"""
+    code = str(code)
+    quote = fetch_quote(code)
+    today = datetime.date.today().isoformat()
+    years = [2023, 2024, 2025]
+    hist = build_hist_hk(code, years)
+    ccy = hist['currency']
+    segs = build_segments_hk(hist, years)
+    fcst = list(range(years[-1] + 1, years[-1] + 6))
+    ass = derive_assumptions(hist, fcst)
+    ass['dividend']['surplus_rate'] = {'value': 0.0,
+                                       'basis': 'IFRS无法定盈余公积科目, 计提率置0'}
+    fx_hkd = 7.80 if ccy == '美元' else 1.0
+    price_m = round(quote['price'] / fx_hkd, 4)       # 模型价(财报币种) = 港元价 / fx
+    rev0, np0 = hist['is']['rev'][-1], hist['is']['np_p'][-1]
+    gy = rev0 / hist['is']['rev'][-2] - 1 if len(hist['is']['rev']) >= 2 else 0.1
+    g_path = [gy * f for f in (1.0, 0.75, 0.55)]
+    cons_rev = [round(rev0 * (1 + gp), 1) for gp in g_path]
+    npm0 = np0 / rev0 if rev0 else 0.1
+    cons_np = [round(rv * npm0, 1) for rv in cons_rev]
+    cfg = {
+        'company': {'code': code, 'code_full': f'{code}.HK', 'name': quote['name'],
+                    'currency_note': f'{ccy}(财报口径) / 百万元 (每股数据为{ccy}; 港元现价按fx折算)',
+                    'unit': f'{ccy}百万元(财报口径)'},
+        'model': {'hist_years': years, 'fcst_years': fcst,
+                  'valuation_date': today, 'build_date': today},
+        'market': {
+            'price': {'value': price_m,
+                      'basis': f'{today}腾讯行情港元现价{quote["price"]} / fx{fx_hkd}={price_m}{ccy}'},
+            'shares': {'value': quote['shares_m'],
+                       'basis': f'总市值{quote["mcap_yi"]:.1f}亿港元/港元现价(腾讯行情 {today}); 港股总市值=全部股本×港元价, 与A+H实际口径有差异'},
+            'pe_ttm': quote['pe_ttm'],
+            'pe_ttm_basis': f'腾讯行情PE-TTM(港元口径, {today})',
+            'fx_hkd': {'value': fx_hkd,
+                       'basis': ('手工输入: 港元/财报币种汇率(美元联系汇率区间7.75-7.85中枢); 请按实际更新'
+                                 if ccy == '美元' else '财报币种=人民币, 与港元接近1:1折算, 请按实际更新')},
+        },
+        'consensus': {
+            'rev': {'values': cons_rev, 'basis': f'自动推导(无一致预期输入): 最近年报收入×(1+YoY{gy:+.1%})退坡; 建议手工填入'},
+            'np': {'values': cons_np, 'basis': f'自动推导(无一致预期输入): 收入×最近年报净利率{npm0:.1%}; 建议手工填入'},
+        },
+        'segments': segs,
+        **ass,
+        'wacc': {
+            'rf': {'value': 0.04, 'basis': '通用默认(港股): 10年期美债收益率约4%(财报币种口径)'},
+            'erp': {'value': 0.055, 'basis': '通用默认: ERP中枢5.5%; 港股口径请按研究修正'},
+            'srp': {'value': 0.0, 'basis': '通用默认: 不取个股溢价(避免与β/情景重复计价)'},
+            'kd': {'value': 0.034, 'basis': '通用默认: ≈债务加权平均利率'},
+            'tg': {'value': 0.03, 'basis': '通用默认: 长期名义增速中枢下沿'},
+            'override': None,
+            'beta_unlevered_input': 1.0,
+            'beta_unlevered_basis': '兜底默认: 未配置可比公司, βu=1.0蓝色输入; 建议补relative_val.comps后自动取中位数',
+        },
+        'scenarios': {
+            'bear': {'rev_adj': -0.15, 'npm_adj': -0.03, 'logic': '通用默认: 分部增速-15pct, 净利率-3pct'},
+            'base': {'rev_adj': 0.0, 'npm_adj': 0.0, 'logic': '基准: 不调整'},
+            'bull': {'rev_adj': 0.10, 'npm_adj': 0.015, 'logic': '通用默认: 分部增速+10pct, 净利率+1.5pct'},
+        },
+        'hist': {k: v for k, v in hist.items() if k in ('is', 'bs', 'cf', 'ppe_split')},
+        'relative_val': {
+            'target_pe_lo': {'value': 25.0, 'basis': '兜底默认: 25x(无可比清单); 建议补comps后取可比中位数为上界'},
+            'comps': [],
+        },
+        'cover': {'subtitle': f'{quote["name"]} | 港股自动兜底建模(东财HKF10+腾讯行情; 财报币种{ccy})'},
+    }
+    return cfg
 
 
 def _m(v, nd=1):
@@ -355,8 +587,10 @@ def derive_assumptions(hist, fcst_years):
 
 
 def build_fallback_config(code):
-    """全自动兜底: 拉公开数据 + 推导假设 → 完整配置dict"""
+    """全自动兜底: 拉公开数据 + 推导假设 → 完整配置dict (港股走HKF10路径)"""
     code = str(code)
+    if is_hk(code):
+        return build_fallback_config_hk(code)
     quote = fetch_quote(code)
     today = datetime.date.today().isoformat()
     years = [2023, 2024, 2025]
@@ -424,8 +658,8 @@ def apply_fallback(raw, code):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='A股模型配置自动获取 (东财F10/腾讯行情, 系统curl)')
-    ap.add_argument('--code', required=True, help='6位A股代码')
+    ap = argparse.ArgumentParser(description='A股/港股模型配置自动获取 (东财F10·HKF10/腾讯行情, 系统curl)')
+    ap.add_argument('--code', required=True, help='6位A股代码 或 5位港股代码(如 00981)')
     ap.add_argument('--out', help='配置输出路径 (默认 configs/<code>.yaml)')
     ap.add_argument('--stdout', action='store_true', help='打印到stdout而不写文件')
     ap.add_argument('--quote-only', action='store_true', help='只打印行情快照')

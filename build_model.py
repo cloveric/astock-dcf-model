@@ -205,6 +205,8 @@ def build(cfg, out_path, addr_path, research=None):
     H0, F0, F1 = HIST[-1], FCST[0], FCST[-1]
     VAL_DATE = cfg.get('model.valuation_date', '')
     BUILD_DATE = cfg.get('model.build_date', '')
+    UNIT = cfg.get('company.unit', '人民币百万元')        # 港股配置可覆盖为财报币种口径
+    IS_HK = str(CODE_FULL).upper().endswith('.HK')
     YC = {y: get_column_letter(2 + i) for i, y in enumerate(YRS)}   # 报表页 B..
     AC = {y: get_column_letter(3 + i) for i, y in enumerate(FCST)}  # 假设页 C..
 
@@ -228,7 +230,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Assumptions')
     title_bar(ws, f'{NAME}({CODE_FULL}) — Assumptions 驱动总表',
-              f'单位: 人民币百万元(除标注外) | 蓝色=输入/假设, 绿色=外部数据, 黑色=公式 | 数据日期: {VAL_DATE}')
+              f'单位: {UNIT}(除标注外) | 蓝色=输入/假设, 绿色=外部数据, 黑色=公式 | 数据日期: {VAL_DATE}')
     ws.column_dimensions['A'].width = 34
     ws.column_dimensions['B'].width = 8
     for col in 'CDEFG':
@@ -453,7 +455,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Revenue_Segments')
     title_bar(ws, f'{NAME} — Revenue_Segments 分业务收入拆解 (量×价驱动)',
-              f'单位: 人民币百万元 | 历史收入=产品占比×总收入; 预测收入=上年×(1+量增速)×(1+价增速), 增速引用Assumptions并受情景开关调整')
+              f'单位: {UNIT} | 历史收入=产品占比×总收入; 预测收入=上年×(1+量增速)×(1+价增速), 增速引用Assumptions并受情景开关调整')
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -661,7 +663,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Schedules')
     title_bar(ws, f'{NAME} — Schedules 营运资本 / 无形资产 / 股利',
-              '单位: 人民币百万元 | PP&E见PP&E页, 债务与利息见FIN页; 预测行全公式')
+              f'单位: {UNIT} | PP&E见PP&E页, 债务与利息见FIN页; 预测行全公式')
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -727,7 +729,7 @@ def build(cfg, out_path, addr_path, research=None):
     _trans_rt = a1('capex.trans_rate')
     ws = wb.create_sheet('PPE')
     title_bar(ws, f'{NAME} — PP&E 固定资产/在建工程滚动',
-              '单位: 人民币百万元 | 固定资产与在建工程分行滚动: 期初+转固-折旧-处置 / 期初+Capex-转固; 隐含折旧率/年限校验行在底部')
+              f'单位: {UNIT} | 固定资产与在建工程分行滚动: 期初+转固-折旧-处置 / 期初+Capex-转固; 隐含折旧率/年限校验行在底部')
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -783,7 +785,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('FIN')
     title_bar(ws, f'{NAME} — FIN 债务与融资调度 (迭代展开·无循环引用)',
-              '单位: 人民币百万元 | 瀑布: 期初现金+经营CF+投资CF(不含理财)+分红+计划还款+利息→缺口=revolver新增借款→超额现金sweep还短借/长借→溢出购理财; 利息=平均余额×利率的循环链在下方"四、迭代展开"区表内展开4轮, 末轮输出供全簿引用, 无需开启迭代计算')
+              f'单位: {UNIT} | 瀑布: 期初现金+经营CF+投资CF(不含理财)+分红+计划还款+利息→缺口=revolver新增借款→超额现金sweep还短借/长借→溢出购理财; 利息=平均余额×利率的循环链在下方"四、迭代展开"区表内展开4轮, 末轮输出供全簿引用, 无需开启迭代计算')
     ws.column_dimensions['A'].width = 34
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -918,7 +920,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Equity_Roll')
     title_bar(ws, f'{NAME} — Equity_Roll 所有者权益滚动',
-              '单位: 人民币百万元 | 股本/资本公积/库存股/OCI持平滚动; 盈余公积按归母计提; 未分配=期初+归母-分红-盈余公积计提')
+              f'单位: {UNIT} | 股本/资本公积/库存股/OCI持平滚动; 盈余公积按归母计提; 未分配=期初+归母-分红-盈余公积计提')
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -976,7 +978,7 @@ def build(cfg, out_path, addr_path, research=None):
     _g2 = _rev_h[2] / _rev_h[2 - 1] - 1 if NH >= 3 else None
     ws = wb.create_sheet('IS')
     title_bar(ws, f'{NAME} — IS 利润表 ({HIST[0]}A-{F1}E)',
-              '单位: 人民币百万元 | 收入/成本引用Revenue_Segments; 费用率/税率引用Assumptions; 财务费用引用FIN(平均余额计息, FIN页迭代展开第4轮输出)')
+              f'单位: {UNIT} | 收入/成本引用Revenue_Segments; 费用率/税率引用Assumptions; 财务费用引用FIN(平均余额计息, FIN页迭代展开第4轮输出)')
     ws.column_dimensions['A'].width = 26
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1071,7 +1073,7 @@ def build(cfg, out_path, addr_path, research=None):
     _bs_notes = cfg.get('hist.notes') or {}
     ws = wb.create_sheet('BS')
     title_bar(ws, f'{NAME} — BS 资产负债表 ({HIST[0]}A-{F1}E)',
-              '单位: 人民币百万元 | 配平机制=FIN页revolver新增借款/现金sweep/理财承接(货币资金=最低现金); 配平差额检查行应恒=0')
+              f'单位: {UNIT} | 配平机制=FIN页revolver新增借款/现金sweep/理财承接(货币资金=最低现金); 配平差额检查行应恒=0')
     ws.column_dimensions['A'].width = 28
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1199,7 +1201,7 @@ def build(cfg, out_path, addr_path, research=None):
     _cf_h = cfg.raw['hist']['cf']
     ws = wb.create_sheet('CF')
     title_bar(ws, f'{NAME} — CF 现金流量表 (间接法, {HIST[0]}A-{F1}E)',
-              '单位: 人民币百万元 | 利息支出经营加回、筹资列"偿付利息"; 投资含"理财净变动"; 期末货币资金=FIN期末现金=BS货币资金')
+              f'单位: {UNIT} | 利息支出经营加回、筹资列"偿付利息"; 投资含"理财净变动"; 期末货币资金=FIN期末现金=BS货币资金')
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1477,7 +1479,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('DCF')
     title_bar(ws, f'{NAME} — DCF 绝对估值 (FCFF, 显性期{F0}-{F1} + Gordon终值)',
-              f'单位: 人民币百万元 | 估值基准日{VAL_DATE}, 采用年中折现(mid-year convention: t=0.5/1.5/.../{NF-0.5}); WACC/g引用Assumptions(采用值=IF(override为空,计算值,override))')
+              f'单位: {UNIT} | 估值基准日{VAL_DATE}, 采用年中折现(mid-year convention: t=0.5/1.5/.../{NF-0.5}); WACC/g引用Assumptions(采用值=IF(override为空,计算值,override))')
     ws.column_dimensions['A'].width = 32
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1546,7 +1548,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('FCFE')
     title_bar(ws, f'{NAME} — FCFE 股权自由现金流估值 (Ke折现, 与FCFF双视图)',
-              f'单位: 人民币百万元 | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), 直接得股权价值, 无需EV→Equity桥')
+              f'单位: {UNIT} | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), 直接得股权价值, 无需EV→Equity桥')
     ws.column_dimensions['A'].width = 32
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -1812,7 +1814,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Scenarios')
     title_bar(ws, f'{NAME} — Scenarios 熊/基/牛三情景估值',
-              '单位: 人民币百万元 | 基准估值=主模型输出(DCF页/IS页直接引用); 熊/牛保留简化净利率法并附桥接说明; 折现为年中口径与DCF一致')
+              f'单位: {UNIT} | 基准估值=主模型输出(DCF页/IS页直接引用); 熊/牛保留简化净利率法并附桥接说明; 折现为年中口径与DCF一致')
     ws.column_dimensions['A'].width = 26
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
@@ -2158,6 +2160,10 @@ def build(cfg, out_path, addr_path, research=None):
         ('综合参考区间 (元, Summary页)', f"=TEXT({SUMMARYs}!C{ENV_ROW},\"0.00\")&\" ~ \"&TEXT({SUMMARYs}!D{ENV_ROW},\"0.00\")"),
         ('Checks校验', f"={CHKs}!{SUM_CELL}"),
     ]
+    if IS_HK:
+        rows_cover.insert(2, ('市场口径 (港股)',
+                              '无单日涨跌停限制(A股为±10%/20%, 口径差异不影响模型公式); 财务与估值为财报币种口径(见上行), '
+                              '港元现价/总市值按配置fx折算, PE-TTM为港元行情口径仅供对照; 历史三表=东财HKF10(IFRS科目映射, 现金流量表按隐含汇率折算回财报币种)'))
     r = 5
     for k, v in rows_cover:
         if k.startswith('——'):
