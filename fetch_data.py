@@ -70,6 +70,14 @@ def tx_code(code):
     return em_code(code).lower()
 
 
+def default_hist_years(today=None):
+    """按当前月份推最新年报年: 年报披露截止4月30日 → 5月起最新年报=上年, 否则=前年;
+    返回近3个年报年 [y1-2, y1-1, y1]"""
+    today = today or datetime.date.today()
+    y1 = today.year - 1 if today.month >= 5 else today.year - 2
+    return [y1 - 2, y1 - 1, y1]
+
+
 def fetch_quote(code):
     """腾讯行情快照: 现价/总市值(亿)/PE-TTM/名称
     A股(sh/sz/bj)与港股(hkXXXXX)版式的关键字段位置一致: f[3]现价 f[39]PE-TTM f[45]总市值(亿);
@@ -81,6 +89,8 @@ def fetch_quote(code):
         raise RuntimeError(f'腾讯行情解析失败: {txt[:120]}')
     f = m.group(1).split('~')
     price = float(f[3])
+    if price <= 0:
+        raise RuntimeError(f'腾讯行情现价为0({code}停牌或无有效行情), 拒绝兜底建模; 请复盘后重试或手工配置')
     pe_ttm = float(f[39])
     mcap_yi = float(f[45])          # 总市值, 亿元(A股) / 亿港元(港股)
     name = f[1]
@@ -137,18 +147,26 @@ def fetch_composition(code):
 # ============================================================
 
 def fetch_hk_long_table(rpt, code, item_key):
-    """东财HKF10长表 → {year: {科目: 金额}} (仅年报 DATE_TYPE_CODE=001)"""
-    url = (f'https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName={rpt}'
-           f'&columns=ALL&filter=(SECUCODE%3D%22{code}.HK%22)&pageNumber=1&pageSize=500'
-           '&sortTypes=-1&sortColumns=REPORT_DATE&source=HSF10&client=PC')
-    data = json.loads(curl_get(url, referer='https://data.eastmoney.com/'))['result']['data']
+    """东财HKF10长表 → {year: {科目: 金额}} (仅年报 DATE_TYPE_CODE=001)
+    分页拉全: 单页最多pageSize行, 00981资产负债表实测8页3641行, 只取第1页会丢最早年科目"""
     out, ccy = {}, None
-    for row in data:
-        if row.get('DATE_TYPE_CODE') != '001':
-            continue
-        y = int(row['REPORT_DATE'][:4])
-        out.setdefault(y, {})[row[item_key]] = row['AMOUNT']
-        ccy = ccy or row.get('CURRENCY')
+    page = 1
+    while True:
+        url = (f'https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName={rpt}'
+               f'&columns=ALL&filter=(SECUCODE%3D%22{code}.HK%22)&pageNumber={page}&pageSize=500'
+               '&sortTypes=-1&sortColumns=REPORT_DATE&source=HSF10&client=PC')
+        res = json.loads(curl_get(url, referer='https://data.eastmoney.com/')).get('result') or {}
+        data = res.get('data') or []
+        for row in data:
+            if row.get('DATE_TYPE_CODE') != '001':
+                continue
+            y = int(row['REPORT_DATE'][:4])
+            out.setdefault(y, {})[row[item_key]] = row['AMOUNT']
+            ccy = ccy or row.get('CURRENCY')
+        pages = res.get('pages') or 1
+        if page >= pages or not data:
+            break
+        page += 1
     return out, ccy
 
 
@@ -193,7 +211,12 @@ def build_hist_hk(code, years):
         is_d['taxexp'].append(m(li('税项')))
         is_d['np_p'].append(m(li('股东应占溢利')))
 
-        cash = bi('现金及等价物')
+        cash_raw = B.get('现金及等价物')
+        if not cash_raw:
+            raise RuntimeError(
+                f'HKF10资产负债表缺{y}年报"现金及等价物"科目(接口分页缺失或科目变更), '
+                '无法折算CF币种, 拒绝静默按0处理')
+        cash = cash_raw
         tfa = bi('短期投资') + bi('指定以公允价值记账之金融资产(流动)')
         ar, pre, inv = bi('应收帐款'), bi('预付款按金及其他应收款'), bi('存货')
         tca = bi('流动资产合计')
@@ -232,9 +255,14 @@ def build_hist_hk(code, years):
 
         C = cfs[y]
         # 现金流表为人民币口径 → 按隐含汇率(期末现金/BS现金)折算回财报币种
-        fx = (C.get('期末现金') or 0.0) / cash if cash else 1.0
+        fx = (C.get('期末现金') or 0.0) / cash
         if abs(fx - 1.0) < 0.05:
-            fx = 1.0
+            fx = 1.0                              # 财报币种≈人民币, 不折算
+        elif not (3.0 <= fx <= 12.0):
+            raise RuntimeError(
+                f'HKF10 {y}年隐含汇率异常: CF期末现金/BS现金={fx:.4f} 落在[3,12]外 '
+                '(财报币种非人民币时合理区间约6-9), 拒绝静默回退fx=1.0导致该年CF混入人民币口径; '
+                '请检查接口数据或手工配置hist')
 
         def ci(k):
             return (C.get(k) or 0.0) / fx
@@ -280,7 +308,7 @@ def build_fallback_config_hk(code):
     code = str(code)
     quote = fetch_quote(code)
     today = datetime.date.today().isoformat()
-    years = [2023, 2024, 2025]
+    years = default_hist_years()
     hist = build_hist_hk(code, years)
     ccy = hist['currency']
     segs = build_segments_hk(hist, years)
@@ -593,7 +621,7 @@ def build_fallback_config(code):
         return build_fallback_config_hk(code)
     quote = fetch_quote(code)
     today = datetime.date.today().isoformat()
-    years = [2023, 2024, 2025]
+    years = default_hist_years()
     hist = build_hist(code, years)
     comp = fetch_composition(code)
     segs = build_segments(comp, years) if comp else []
