@@ -200,6 +200,11 @@ def build(cfg, out_path, addr_path, research=None):
     NAME, CODE_FULL = co['name'], co['code_full']
     HIST = [int(y) for y in cfg.get('model.hist_years')]
     FCST = [int(y) for y in cfg.get('model.fcst_years')]
+    # C2④: 版面结构性前提显式校验 (YoY引用上年列 / 一致预期取前3个预测年 / 假设页C起NF列等)
+    if len(HIST) < 2:
+        raise ValueError(f'配置错误: model.hist_years 需≥2年(现{len(HIST)}年) — 收入YoY与期初余额锚点依赖上一年列')
+    if not (3 <= len(FCST) <= 5):
+        raise ValueError(f'配置错误: model.fcst_years 需3-5年(现{len(FCST)}年) — 一致预期区取前3年、版面按3-5列设计')
     YRS = HIST + FCST
     NH, NF = len(HIST), len(FCST)
     H0, F0, F1 = HIST[-1], FCST[0], FCST[-1]
@@ -209,6 +214,9 @@ def build(cfg, out_path, addr_path, research=None):
     IS_HK = str(CODE_FULL).upper().endswith('.HK')
     YC = {y: get_column_letter(2 + i) for i, y in enumerate(YRS)}   # 报表页 B..
     AC = {y: get_column_letter(3 + i) for i, y in enumerate(FCST)}  # 假设页 C..
+    NOTE_COL = 2 + len(YRS)   # C2③: 报表页备注列=年份列后一列 (3历史+5预测→列10, 与既有版面等值)
+    AB_COL = 3 + NF           # C2②: Assumptions依据列=C起NF列预测值后一列 (3+5=8即'H', 与既有版面等值)
+    _cy = [str(y)[2:] for y in FCST[:3]]   # C1: 一致预期行key年份后缀, 随fcst_years联动 (2026起步时=['26','27','28'])
 
     SEGS = cfg.get('segments')
     for sg in SEGS:
@@ -233,9 +241,9 @@ def build(cfg, out_path, addr_path, research=None):
               f'单位: {UNIT}(除标注外) | 蓝色=输入/假设, 绿色=外部数据, 黑色=公式 | 数据日期: {VAL_DATE}')
     ws.column_dimensions['A'].width = 34
     ws.column_dimensions['B'].width = 8
-    for col in 'CDEFG':
-        ws.column_dimensions[col].width = 11
-    ws.column_dimensions['H'].width = 95
+    for _i in range(NF):
+        ws.column_dimensions[get_column_letter(3 + _i)].width = 11
+    ws.column_dimensions[get_column_letter(AB_COL)].width = 95
     ws.freeze_panes = 'C4'
 
     A = {}   # key -> row
@@ -263,13 +271,8 @@ def build(cfg, out_path, addr_path, research=None):
                 put(ws, r, 3 + i, v, kind, fmt)
         else:
             put(ws, r, 3, vals, kind, fmt)
-        put(ws, r, 8, _ann(label, basis), 'g', size=9, wrap=True)
+        put(ws, r, AB_COL, _ann(label, basis), 'g', size=9, wrap=True)
         return r
-
-    def arow_e(r, label, unit, entry, kind='in', fmt=PCT, n=NF):
-        return arow(r, label, unit, _broadcast(entry['values'], n)
-                    if isinstance(entry['values'], (list, tuple)) or n > 1 else entry['values'],
-                    entry['basis'], kind, fmt)
 
     def a5(path):
         return _broadcast(cfg.e(path)['values'], NF)
@@ -286,13 +289,23 @@ def build(cfg, out_path, addr_path, research=None):
     A['sw'] = arow(r, '情景开关 (1=熊/2=基准/3=牛)', '-', 2,
                    '三情景总开关, 驱动Revenue_Segments分部增速与毛利率、进而贯穿IS/BS/CF/DCF; 默认2=基准', 'in', '0'); r += 1
     put(ws, r, 1, '估值基准日 / 行情数据日期', 't'); put(ws, r, 3, VAL_DATE, 'x', align='center')
-    put(ws, r, 8, f'现价与可比公司市值均为{VAL_DATE}收盘(腾讯行情); DCF采用年中折现(见DCF页)', 'g', size=9); r += 1
-    A['px'] = arow(r, '现价', '元/股', cfg.v('market.price'), ab('market.price'), 'x', PS); r += 1
+    put(ws, r, AB_COL, f'现价与可比公司市值均为{VAL_DATE}收盘(腾讯行情); DCF采用年中折现(见DCF页)', 'g', size=9); r += 1
+    # F1: 港股双字段口径 — 同时存在market.price_hkd与market.fx_hkd(均>0)时按 price_hkd/fx_hkd
+    #     重折算模型价(fetch_data接口约定: price字段仅为生成时的折算快照); 否则沿用market.price
+    _px_hkd, _fx_hkd = cfg.v('market.price_hkd'), cfg.v('market.fx_hkd')
+    if (isinstance(_px_hkd, (int, float)) and isinstance(_fx_hkd, (int, float))
+            and _px_hkd > 0 and _fx_hkd > 0):
+        _px_val = _px_hkd / _fx_hkd
+        _px_basis = _norm_entry(cfg.get('market.price_hkd'))['basis'] or '港元现价/汇率折算为财报币种'
+        _px_basis = f'{_px_basis} | =港元{_px_hkd:g}/fx{_fx_hkd:g}={_px_val:.4f}'
+    else:
+        _px_val, _px_basis = cfg.v('market.price'), ab('market.price')
+    A['px'] = arow(r, '现价', '元/股', _px_val, _px_basis, 'x', PS); r += 1
     A['sh'] = arow(r, '总股本', '百万股', cfg.v('market.shares'), ab('market.shares'), 'x', NUM); r += 1
     put(ws, r, 1, '总市值', 't'); put(ws, r, 2, '百万', 'g', align='center')
     put(ws, r, 3, '=C{}*C{}'.format(A['px'], A['sh']), 'f', NUM)
-    _mcap_yi = cfg.v('market.price') * cfg.v('market.shares') / 100
-    put(ws, r, 8, f'=现价×总股本, 约{_mcap_yi:.0f}亿元, 与行情软件一致', 'g', size=9); A['mcap'] = r; r += 1
+    _mcap_yi = _px_val * cfg.v('market.shares') / 100
+    put(ws, r, AB_COL, f'=现价×总股本, 约{_mcap_yi:.0f}亿元, 与行情软件一致', 'g', size=9); A['mcap'] = r; r += 1
     r += 1
 
     sec(ws, r, '二、市场一致预期与最新财报 (外部数据, 绿色)'); r += 1
@@ -316,7 +329,7 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '年份', 't', bold=True)
     for i, y in enumerate(FCST):
         put(ws, r, 3 + i, f'{y}E', 't', bold=True, align='center')
-    put(ws, r, 8, '假设依据 / 来源', 't', bold=True); r += 1
+    put(ws, r, AB_COL, '假设依据 / 来源', 't', bold=True); r += 1
     for sg in SEGS:
         k = sg['key']
         vol_lab = f"{sg['short']} 销量增速" if sg['driver'] == 'vol_asp' else f"{sg['short']} 收入增速"
@@ -345,6 +358,30 @@ def build(cfg, out_path, addr_path, research=None):
     A['oth_op'] = arow(r, '其他经营损益', '百万', a5('opex.oth_op'), ab('opex.oth_op'), 'in', NUM); r += 1
     A['nonop'] = arow(r, '营业外收支净额', '百万', a5('opex.nonop'), ab('opex.nonop'), 'in', NUM); r += 1
     A['tax'] = arow(r, '有效税率', '%', a5('opex.tax_rate'), ab('opex.tax_rate')); r += 1
+    # A1: 少数股东损益占净利润比 — 预测期 归母净利润=合并净利润×(1-本行);
+    #     默认按历史(合并净利-归母)/合并净利均值自动推导并clamp到[0,50%], config可经model.mi_share覆盖;
+    #     历史合并净利按IS同口径倒推(收入-成本-税金-三费-财务+其他经营+营业外-所得税, othop含轧差)
+    _is_hist = cfg.raw['hist']['is']
+    _mi_ratios = []
+    for _i in range(NH):
+        _np_merge = (_is_hist['rev'][_i] - _is_hist['cost'][_i] - _is_hist['taxadd'][_i]
+                     - _is_hist['sale'][_i] - _is_hist['adm'][_i] - _is_hist['rd'][_i]
+                     - _is_hist['fin'][_i] + _is_hist['othop'][_i] + _is_hist['nonop'][_i]
+                     - _is_hist['taxexp'][_i])
+        if abs(_np_merge) > 1e-9:
+            _mi_ratios.append((_np_merge - _is_hist['np_p'][_i]) / _np_merge)
+    _mi_raw = sum(_mi_ratios) / len(_mi_ratios) if _mi_ratios else 0.0
+    _mi_auto = min(0.5, max(0.0, round(_mi_raw, 6)))   # round防浮点噪声, 负值(少数股东亏损)clamp为0
+    _mi_cfg = cfg.get('model.mi_share')
+    if _mi_cfg is not None:
+        _mi_ent = _norm_entry(_mi_cfg)
+        _mi_vals = _broadcast(_mi_ent['values'], NF)
+        _mi_basis = _mi_ent['basis'] or 'config覆盖(model.mi_share)'
+    else:
+        _mi_vals = [_mi_auto] * NF
+        _mi_basis = (f'按历史均值自动推导: (合并净利-归母)/合并净利 {NH}年均值{_mi_raw:+.2%}, '
+                     f'clamp[0,50%]→采用{_mi_auto:.2%}; config可经model.mi_share覆盖')
+    A['mi_share'] = arow(r, '少数股东损益占净利润比', '%', _mi_vals, _mi_basis); r += 1
     A['oth_rt'] = arow(r, '其他及财务费用率合计(情景页用)', '%', a1('opex.oth_rate'),
                        ab('opex.oth_rate')); r += 1
     r += 1
@@ -388,7 +425,7 @@ def build(cfg, out_path, addr_path, research=None):
     _d0 = round(_bs_hist['stl'][-1] + _bs_hist['cur1y'][-1] + _bs_hist['ltl'][-1] + _bs_hist['lease'][-1], 4)
     put(ws, r, 1, f'{H0}A末有息负债合计', 't'); put(ws, r, 2, '百万', 'g', align='center')
     put(ws, r, 3, _d0, 'x', NUM)
-    put(ws, r, 8, f"=短借{_bs_hist['stl'][-1]:.1f}+一年内{_bs_hist['cur1y'][-1]:.1f}+长借{_bs_hist['ltl'][-1]:.1f}"
+    put(ws, r, AB_COL, f"=短借{_bs_hist['stl'][-1]:.1f}+一年内{_bs_hist['cur1y'][-1]:.1f}+长借{_bs_hist['ltl'][-1]:.1f}"
                   f"+租赁{_bs_hist['lease'][-1]:.1f} (东财F10 {H0}年报); WACC的Wd市值口径引用本行", 'g', size=9)
     A['debt25'] = r; r += 1
     r += 1
@@ -399,38 +436,42 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '可比公司无杠杆βu中位数', 't'); put(ws, r, 2, 'x', 'g', align='center')
     if N_BETA:
         put(ws, r, 3, f"=Relative_Val!$O${RV_MED_ROW}", 'f', '0.000')
-        put(ws, r, 8, '=MEDIAN(可比公司βl/(1+(1-t)×D/E)), 见Relative_Val页L-O列; 改可比beta输入即联动', 'g', size=9)
+        put(ws, r, AB_COL, '=MEDIAN(可比公司βl/(1+(1-t)×D/E)), 见Relative_Val页L-O列; 改可比beta输入即联动', 'g', size=9)
+        # F3: 存在可比beta时βu以可比中位数为准; 若同时配置了beta_unlevered_input, 显式提示其未生效
+        if cfg.v('wacc.beta_unlevered_input') is not None:
+            print(f"警告: 配置了 beta_unlevered_input={cfg.v('wacc.beta_unlevered_input')}, "
+                  f"但存在{N_BETA}家可比beta, 已采用可比中位数, 该输入未生效")
     else:
         _bu = cfg.v('wacc.beta_unlevered_input', 1.0)
         put(ws, r, 3, _bu, 'in', '0.000')
-        put(ws, r, 8, cfg.v('wacc.beta_unlevered_basis', '未配置可比公司, βu为蓝色输入(兜底), 建议补充relative_val.comps'), 'g', size=9)
+        put(ws, r, AB_COL, cfg.v('wacc.beta_unlevered_basis', '未配置可比公司, βu为蓝色输入(兜底), 建议补充relative_val.comps'), 'g', size=9)
     A['beta_u'] = r; r += 1
     put(ws, r, 1, '目标债务权重 Wd (市值口径)', 't'); put(ws, r, 2, '%', 'g', align='center')
     put(ws, r, 3, f"=C{A['debt25']}/(C{A['debt25']}+C{A['mcap']})", 'f', PCT)
-    put(ws, r, 8, cfg.v('wacc.wd_basis',
+    put(ws, r, AB_COL, cfg.v('wacc.wd_basis',
         f'={H0}A末有息负债/(有息负债+总市值): 以市值口径现状结构为目标结构'), 'g', size=9)
     A['wd'] = r; r += 1
     put(ws, r, 1, '目标 D/E = Wd/(1-Wd)', 't'); put(ws, r, 2, 'x', 'g', align='center')
     put(ws, r, 3, f"=C{A['wd']}/(1-C{A['wd']})", 'f', '0.000')
-    put(ws, r, 8, 'relever用目标产权比率', 'g', size=9); A['de_t'] = r; r += 1
+    put(ws, r, AB_COL, 'relever用目标产权比率', 'g', size=9); A['de_t'] = r; r += 1
     put(ws, r, 1, '再杠杆βl = βu×(1+(1-t)×D/E)', 't'); put(ws, r, 2, 'x', 'g', align='center')
     put(ws, r, 3, f"=C{A['beta_u']}*(1+(1-C{A['tax']})*C{A['de_t']})", 'f', '0.000')
-    put(ws, r, 8, f'Hamada公式, t={F0}E有效税率', 'g', size=9); A['beta'] = r; r += 1
+    put(ws, r, AB_COL, f'Hamada公式, t={F0}E有效税率', 'g', size=9); A['beta'] = r; r += 1
     A['srp'] = arow(r, '个股/执行风险溢价 (已删除=0)', '%', a1('wacc.srp'), ab('wacc.srp')); r += 1
     put(ws, r, 1, '股权成本 Ke = rf+βl×ERP+溢价', 't'); put(ws, r, 2, '%', 'g', align='center')
     put(ws, r, 3, f"=C{A['rf']}+C{A['beta']}*C{A['erp']}+C{A['srp']}", 'f', PCT)
-    put(ws, r, 8, 'CAPM公式(溢价默认为0)', 'g', size=9); A['ke'] = r; r += 1
+    put(ws, r, AB_COL, 'CAPM公式(溢价默认为0)', 'g', size=9); A['ke'] = r; r += 1
     A['kd'] = arow(r, '债务成本 Kd', '%', a1('wacc.kd'), ab('wacc.kd')); r += 1
     put(ws, r, 1, 'WACC (计算值)', 't'); put(ws, r, 2, '%', 'g', align='center')
     put(ws, r, 3, f"=(1-C{A['wd']})*C{A['ke']}+C{A['wd']}*C{A['kd']}*(1-C{A['tax']})", 'f', PCT)
-    put(ws, r, 8, '=(1-Wd)×Ke + Wd×Kd×(1-t)', 'g', size=9); A['wacc_calc'] = r; r += 1
+    put(ws, r, AB_COL, '=(1-Wd)×Ke + Wd×Kd×(1-t)', 'g', size=9); A['wacc_calc'] = r; r += 1
     put(ws, r, 1, 'WACC override (留空=用计算值)', 't'); put(ws, r, 2, '%', 'g', align='center')
     put(ws, r, 3, cfg.v('wacc.override', None), 'in', PCT)
-    put(ws, r, 8, '蓝色输入, 留空则采用上方计算值; 填入数值则覆盖(Checks页校验采用值=计算值或override非空)', 'g', size=9)
+    put(ws, r, AB_COL, '蓝色输入, 留空则采用上方计算值; 填入数值则覆盖(Checks页校验采用值=计算值或override非空)', 'g', size=9)
     A['wacc_ovr'] = r; r += 1
     put(ws, r, 1, 'WACC (采用值)', 't', ); put(ws, r, 2, '%', 'g', align='center')
     c = put(ws, r, 3, f"=IF(C{A['wacc_ovr']}=\"\",C{A['wacc_calc']},C{A['wacc_ovr']})", 'f', PCT, bold=True, fill=CHK_FILL)
-    put(ws, r, 8, '=IF(override="", 计算值, override); DCF/Sensitivity/Scenarios全部引用本行', 'g', size=9)
+    put(ws, r, AB_COL, '=IF(override="", 计算值, override); DCF/Sensitivity/Scenarios全部引用本行', 'g', size=9)
     A['wacc'] = r; r += 1
     A['tg'] = arow(r, '永续增长率 g', '%', a1('wacc.tg'), ab('wacc.tg')); r += 1
     r += 1
@@ -439,12 +480,12 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '情景', 't', bold=True)
     put(ws, r, 3, '收入增速调整', 't', bold=True, align='center')
     put(ws, r, 4, '净利率调整', 't', bold=True, align='center')
-    put(ws, r, 8, '情景逻辑', 't', bold=True); r += 1
+    put(ws, r, AB_COL, '情景逻辑', 't', bold=True); r += 1
     for skey, sname, skind in [('bear', '熊市 Bear', 'w'), ('base', '基准 Base', 't'), ('bull', '牛市 Bull', 't')]:
         scfg = cfg.raw['scenarios'][skey]
         put(ws, r, 1, sname, skind, bold=True)
         put(ws, r, 3, scfg['rev_adj'], 'in', PCT); put(ws, r, 4, scfg['npm_adj'], 'in', PCT)
-        put(ws, r, 8, scfg.get('logic', ''), 'g', size=9)
+        put(ws, r, AB_COL, scfg.get('logic', ''), 'g', size=9)
         A[f'sc_{skey}'] = r; r += 1
 
     ASheet = 'Assumptions'
@@ -459,7 +500,7 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 90
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 90
     ws.freeze_panes = 'B4'
 
     SW = f"{ASheet}!$C${A['sw']}"
@@ -487,13 +528,13 @@ def build(cfg, out_path, addr_path, research=None):
         lab = f'{y}A' if y in HIST else f'{y}E'
         c = put(ws, r, 2 + YRS.index(y), lab, 't', bold=True, align='center')
         c.fill = TOT_FILL
-    put(ws, r, 10, '备注 / 来源', 't', bold=True)
+    put(ws, r, NOTE_COL, '备注 / 来源', 't', bold=True)
     r += 1
     # 历史总收入参考行
     put(ws, r, 1, '营业收入合计(历史实际)', 't')
     for y, v in zip(HIST, cfg.raw['hist']['is']['rev']):
         put(ws, r, 2 + YRS.index(y), v, 'x', NUM)
-    put(ws, r, 10, f'东财F10利润表: {HIST[0]}-{H0}实际营收', 'g', size=9)
+    put(ws, r, NOTE_COL, f'东财F10利润表: {HIST[0]}-{H0}实际营收', 'g', size=9)
     TOT_HIST = r
     r += 1
 
@@ -517,7 +558,7 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, '  收入占比', 't')
         for i, y in enumerate(HIST):
             put(ws, r, 2 + i, mix[i], 'x', PCT)
-        put(ws, r, 10, sg.get('share_basis', '占比: 东财F10主营构成(按产品)'), 'g', size=9)
+        put(ws, r, NOTE_COL, sg.get('share_basis', '占比: 东财F10主营构成(按产品)'), 'g', size=9)
         rows['share'] = r
         r += 1
         # 量增速 (growth驱动业务为合并增速)
@@ -527,7 +568,7 @@ def build(cfg, out_path, addr_path, research=None):
             put(ws, r, 2 + i, '—', 'g', align='center')
         for y in FCST:
             put(ws, r, 2 + YRS.index(y), f"={adj_g(volk)(y)}", 'f', PCT)
-        put(ws, r, 10, '=Assumptions基础增速+CHOOSE(情景开关,熊,基,牛)', 'g', size=9)
+        put(ws, r, NOTE_COL, '=Assumptions基础增速+CHOOSE(情景开关,熊,基,牛)', 'g', size=9)
         rows['vol'] = r
         r += 1
         # ASP增速
@@ -545,7 +586,7 @@ def build(cfg, out_path, addr_path, research=None):
             put(ws, r, 2 + i, gm_hist[i], 'x', PCT)
         for y in FCST:
             put(ws, r, 2 + YRS.index(y), f"={adj_gm(gmk)(y)}", 'f', PCT)
-        put(ws, r, 10, '历史: 主营构成分产品毛利率; 预测: Assumptions+情景调整', 'g', size=9)
+        put(ws, r, NOTE_COL, '历史: 主营构成分产品毛利率; 预测: Assumptions+情景调整', 'g', size=9)
         rows['gm'] = r
         r += 1
         # 毛利
@@ -564,12 +605,9 @@ def build(cfg, out_path, addr_path, research=None):
             else:
                 f = f"={pl}{rr}*(1+{cl}{rows['vol']})"
             put(ws, rr, 2 + YRS.index(y), f, 'f', NUM)
-        # 占比预测列
-        for y in FCST:
-            cl = YC[y]
-            put(ws, rows['share'], 2 + YRS.index(y), f"={cl}{rr}/{cl}$X", 'f', PCT)  # placeholder X fixed later
+        # 占比预测列在REV_TOT行号确定后统一写入(见"回填占比预测列"), 此处不再先写占位公式
         # 逻辑
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
         put(ws, r, 1, '  逻辑: ' + logic, 'g', size=9, wrap=True)
         rows['logic'] = r
         r += 1
@@ -600,11 +638,11 @@ def build(cfg, out_path, addr_path, research=None):
         cl, pl = YC[y], YC[y - 1]
         put(ws, r, 2 + YRS.index(y), f"={cl}{REV_TOT}/{pl}{REV_TOT}-1", 'f', PCT)
     r += 1
-    # 回填占比预测列的分母
+    # H4: 回填占比预测列 — REV_TOT行号确定后一次性写入完整公式与格式(不再先写坏公式再补丁)
     for key in RSEG:
         for y in FCST:
             cl = YC[y]
-            ws.cell(row=RSEG[key]['share'], column=2 + YRS.index(y)).value = f"={cl}{RSEG[key]['rev']}/{cl}{REV_TOT}"
+            put(ws, RSEG[key]['share'], 2 + YRS.index(y), f"={cl}{RSEG[key]['rev']}/{cl}{REV_TOT}", 'f', PCT)
     r += 1
 
     # 基准情形演算 (不受情景开关影响, 供Scenarios页引用)
@@ -615,7 +653,8 @@ def build(cfg, out_path, addr_path, research=None):
                   f"{sg['key']}_gm") for sg in SEGS]
     for key, volk, aspk, gmk in base_defs:
         put(ws, r, 1, f'基准收入 — {key}', 't')
-        put(ws, r, 4, f"={YC[H0]}{RSEG[key]['rev']}", 'f', NUM)
+        # C2①: 种子写入H0列(动态), 3历史年时=第4列与旧版面等值
+        put(ws, r, 2 + YRS.index(H0), f"={YC[H0]}{RSEG[key]['rev']}", 'f', NUM)
         for y in FCST:
             cl, pl = YC[y], YC[y - 1]
             if aspk:
@@ -630,7 +669,8 @@ def build(cfg, out_path, addr_path, research=None):
         cl = YC[y]
         expr = '+'.join(f"{cl}{BASE_SEG[k]}" for k in seg_keys)
         put(ws, r, 2 + YRS.index(y), f"={expr}", 'f', NUM)
-    put(ws, r, 4, '=' + '+'.join(f"{YC[H0]}{RSEG[k]['rev']}" for k in seg_keys), 'f', NUM)
+    # C2①: 合计种子同样写入H0列(动态)
+    put(ws, r, 2 + YRS.index(H0), '=' + '+'.join(f"{YC[H0]}{RSEG[k]['rev']}" for k in seg_keys), 'f', NUM)
     BASE_REV = r; r += 1
     put(ws, r, 1, '基准收入增速', 't')
     for y in FCST:
@@ -650,7 +690,7 @@ def build(cfg, out_path, addr_path, research=None):
     if refs:
         sec(ws, r, '产能 / 客户 / 行业参考 (外部信息)'); r += 1
         for txt in refs:
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
             put(ws, r, 1, txt, 'x', size=9, wrap=True)
             ws.row_dimensions[r].height = 24
             r += 1
@@ -667,12 +707,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 60
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 60
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     S = {}
     r = 5
@@ -693,7 +733,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('dnwc', 'ΔNWC (增加为正)', 'CF中扣减项'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key in ('nwc_a', 'nwc_l', 'nwc')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         S[key] = r
         r += 1
     r += 1
@@ -705,14 +745,14 @@ def build(cfg, out_path, addr_path, research=None):
         ('ia1', '期末无形资产', '=期初-摊销'),
     ]:
         put(ws, r, 1, lab, 't')
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         S[key] = r
         r += 1
     r += 1
     sec(ws, r, '三、股利'); r += 1
     _payout0 = a5('dividend.payout')[0]
     put(ws, r, 1, '现金分红(当年支付)', 't')
-    put(ws, r, 10, f'=上年归母净利×支付率{_payout0:.0%}', 'g', size=9)
+    put(ws, r, NOTE_COL, f'=上年归母净利×支付率{_payout0:.0%}', 'g', size=9)
     S['div'] = r
     r += 1
     SCH = 'Schedules'
@@ -733,12 +773,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 66
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 66
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     P = {}
     r = 5
@@ -751,7 +791,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('fa1', '期末固定资产净值', '=期初+转固-折旧-处置'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key == 'fa1'))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         P[key] = r
         r += 1
     r += 1
@@ -762,7 +802,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('cip1', '期末在建工程', '=期初+Capex-转固'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key == 'cip1'))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         P[key] = r
         r += 1
     r += 1
@@ -774,7 +814,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('dep_yrs', '校验: 隐含折旧年限(期初净值/折旧)', '信息行; 机器设备为主, 5-10年为合理带'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key in ('ppe1', 'da')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         P[key] = r
         r += 1
     PPEs = 'PPE'
@@ -789,13 +829,13 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 34
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 70
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 70
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         lab = f'{y}A' if y in HIST else f'{y}E'
         put(ws, 3, 2 + YRS.index(y), lab, 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     F = {}
     r = 5
@@ -813,7 +853,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('avail', '可动用现金(还债+购理财)', '=MAX(0, 融资前结余+新增借款-最低现金)'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key in ('cpre', 'new', 'avail')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         F[key] = r
         r += 1
     r += 1
@@ -840,7 +880,7 @@ def build(cfg, out_path, addr_path, research=None):
                      ('int', '利息支出', '=平均余额×利率(按期末余额重算的隐含值; 与采用值(第4轮迭代输出)之差见下方残差行)')]
         for key2, lab, note in rows_def:
             put(ws, r, 1, lab, 't', bold=(key2 == 't1'))
-            put(ws, r, 10, note, 'g', size=9)
+            put(ws, r, NOTE_COL, note, 'g', size=9)
             F[f'{tranche}_{key2}'] = r
             r += 1
         r += 1
@@ -862,13 +902,13 @@ def build(cfg, out_path, addr_path, research=None):
         ('finnet', '财务费用净额(→IS)', '=利息支出-利息收入+其他'),
     ]:
         put(ws, r, 1, lab, 't', bold=(key in ('dtot1', 'cash1', 'finnet')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         F[key] = r
         r += 1
     # --- 四、迭代展开区 (利息↔净利↔现金↔sweep↔利息循环的表内显式展开, 全簿无循环引用) ---
     r += 1
     sec(ws, r, '四、迭代展开 (iteration unrolling — 循环链表内展开, 替代Excel迭代计算)'); r += 1
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
     put(ws, r, 1, '方法: 第1轮按"期初债务×利率"计息→算期末债务₁/现金₁; 第k轮(k=2..4)按"(期初+上轮期末)/2×利率"重算→期末_k; '
                   '第4轮输出回填上方汇总行(利息支出合计/利息收入/财务费用净额)供IS/CF/BS引用; '
                   '每轮残差=|Δ利息支出|+|Δ利息收入|(相对上轮), <0.01即收敛(外部不动点法实测6轮内收敛至1e-8, 4轮充足)', 'g', size=9, wrap=True)
@@ -908,7 +948,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('resid_ok', '收敛判定 (TRUE=收敛)', ''),
     ]:
         put(ws, r, 1, lab, 't', bold=(key2 in ('resid_max', 'resid_ok')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         F[key2] = r
         r += 1
     FINs = 'FIN'
@@ -924,12 +964,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 60
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 60
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     Q = {}
     r = 5
@@ -949,22 +989,22 @@ def build(cfg, out_path, addr_path, research=None):
         ('te', '所有者权益合计', ''),
     ]:
         put(ws, r, 1, lab, 't', bold=(key in ('te_p', 'te')))
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         Q[key] = r
         r += 1
     r += 1
     sec(ws, r, '稀释股数'); r += 1
     put(ws, r, 1, '基本股数(总股本, 百万股)', 't')
     put(ws, r, 3, f"={ASheet}!$C${A['sh']}", 'f', NUM)
-    put(ws, r, 10, f'=Assumptions总股本{cfg.v("market.shares")/100:.2f}亿股', 'g', size=9)
+    put(ws, r, NOTE_COL, f'=Assumptions总股本{cfg.v("market.shares")/100:.2f}亿股', 'g', size=9)
     Q['sh_basic'] = r; r += 1
     put(ws, r, 1, '稀释工具(可转债/期权等, 百万股)', 't')
     put(ws, r, 3, cfg.v('equity.dilutive', 0.0), 'in', NUM)
-    put(ws, r, 10, cfg.v('equity.dilutive_basis', '占位输入: 如有流通可转债/期权等稀释工具在此输入'), 'g', size=9)
+    put(ws, r, NOTE_COL, cfg.v('equity.dilutive_basis', '占位输入: 如有流通可转债/期权等稀释工具在此输入'), 'g', size=9)
     Q['sh_dil'] = r; r += 1
     put(ws, r, 1, '稀释后股数(百万股)', 't', bold=True)
     c = put(ws, r, 3, f"=C{Q['sh_basic']}+C{Q['sh_dil']}", 'f', NUM, bold=True, fill=CHK_FILL)
-    put(ws, r, 10, 'DCF/相对估值/Scenarios每股口径统一引用本行', 'g', size=9)
+    put(ws, r, NOTE_COL, 'DCF/相对估值/Scenarios每股口径统一引用本行', 'g', size=9)
     Q['shares'] = r; r += 1
     EQs = 'Equity_Roll'
     print('Equity_Roll rows:', Q)
@@ -982,12 +1022,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 26
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 70
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 70
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注 / 来源', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注 / 来源', 't', bold=True)
 
     I = {}
     r = 4
@@ -1000,7 +1040,7 @@ def build(cfg, out_path, addr_path, research=None):
         if fcst_fn is not None:
             for y in FCST:
                 put(ws, r, 2 + YRS.index(y), fcst_fn(y), 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         I[key] = r
         r += 1
 
@@ -1010,7 +1050,7 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, label, 't', bold=bold)
         for y in YRS:
             put(ws, r, 2 + YRS.index(y), all_fn(y), 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         I[key] = r
         r += 1
 
@@ -1020,7 +1060,7 @@ def build(cfg, out_path, addr_path, research=None):
     for y in YRS[1:]:
         put(ws, r, 2 + YRS.index(y), f"={YC[y]}{I['rev']}/{YC[y-1]}{I['rev']}-1", 'f', PCT)
     _gyoy = f'{HIST[1]}A {_g1:+.1%}' + (f' / {H0}A {_g2:+.1%}' if _g2 is not None else '')
-    put(ws, r, 10, f'历史: {_gyoy}', 'g', size=9)
+    put(ws, r, NOTE_COL, f'历史: {_gyoy}', 'g', size=9)
     I['rev_g'] = r; r += 1
     isrow('cost', '营业成本', _is_h['cost'], lambda y: f"={YC[y]}{I['rev']}-{RS}!{YC[y]}{GP_TOT}", '历史: 东财F10实际值; 预测=收入-分部毛利合计(占比四舍五入, 历史分部毛利与总额存微小口径差)')
     isf('gp', '毛利', lambda y: f"={YC[y]}{I['rev']}-{YC[y]}{I['cost']}", '', NUM, True)
@@ -1028,7 +1068,7 @@ def build(cfg, out_path, addr_path, research=None):
     for y in YRS:
         put(ws, r, 2 + YRS.index(y), f"={YC[y]}{I['gp']}/{YC[y]}{I['rev']}", 'f', PCT)
     _gm_h = [(_rev_h[i] - _is_h['cost'][i]) / _rev_h[i] for i in range(NH)]
-    put(ws, r, 10, f'{HIST[0]}A {_gm_h[0]:.1%}→{H0}A {_gm_h[-1]:.1%}; 预测由分部毛利率加权', 'g', size=9)
+    put(ws, r, NOTE_COL, f'{HIST[0]}A {_gm_h[0]:.1%}→{H0}A {_gm_h[-1]:.1%}; 预测由分部毛利率加权', 'g', size=9)
     I['gm'] = r; r += 1
     isrow('taxadd', '税金及附加', _is_h['taxadd'], lambda y: f"={YC[y]}{I['rev']}*{ASheet}!{AC[y]}${A['rt_taxadd']}", f"预测=收入×{a5('opex.tax_add_rate')[0]:.2%}")
     isrow('sale', '销售费用', _is_h['sale'], lambda y: f"={YC[y]}{I['rev']}*{ASheet}!{AC[y]}${A['rt_sale']}", f"预测=收入×{a5('opex.sale_rate')[0]:.2%}")
@@ -1041,13 +1081,19 @@ def build(cfg, out_path, addr_path, research=None):
     isrow('nonop', '营业外收支净额', _is_h['nonop'], lambda y: f"={ASheet}!{AC[y]}${A['nonop']}", f"{H0}A {_is_h['nonop'][-1]:.1f}百万")
     isf('tprofit', '利润总额', lambda y: f"={YC[y]}{I['ebit_op']}+{YC[y]}{I['nonop']}", '', NUM, True)
     isrow('taxexp', '所得税', _is_h['taxexp'], lambda y: f"={YC[y]}{I['tprofit']}*{ASheet}!{AC[y]}${A['tax']}", f"预测=利润总额×{a5('opex.tax_rate')[0]:.1%}")
-    isf('np', '净利润', lambda y: f"={YC[y]}{I['tprofit']}-{YC[y]}{I['taxexp']}", '', NUM, True)
+    isf('np', '净利润', lambda y: f"={YC[y]}{I['tprofit']}-{YC[y]}{I['taxexp']}", '合并口径(含少数股东损益)', NUM, True)
+    # A1: 归母≠合并 — 历史归母取config硬数(hist.is.np_p, 与hist.cf.np同为归母口径, 绿色);
+    #     预测 归母净利润=合并净利润×(1-mi_share); mi_share=0的标的与合并口径数值恒等(np×(1-0)=np)
     _np_note = '历史: ' + '/'.join(f'{y}A {v/100:.1f}亿' for y, v in zip(HIST, _is_h['np_p']))
-    isf('np_p', '归母净利润', lambda y: f"={YC[y]}{I['np']}", _np_note, NUM, True)
+    isrow('np_p', '归母净利润', _is_h['np_p'],
+          lambda y: f"={YC[y]}{I['np']}*(1-{ASheet}!{AC[y]}${A['mi_share']})",
+          _np_note + ' (config硬数, 归母口径=hist.cf.np); 预测=净利润×(1-少数股东损益占比)', NUM, bold=True)
+    isf('mi', '少数股东损益', lambda y: f"={YC[y]}{I['np']}-{YC[y]}{I['np_p']}",
+        '=净利润-归母净利润; 历史为合并与归母口径差(倒挤), 预测=净利润×mi_share')
     put(ws, r, 1, '  归母净利率', 't')
     for y in YRS:
         put(ws, r, 2 + YRS.index(y), f"={YC[y]}{I['np_p']}/{YC[y]}{I['rev']}", 'f', PCT)
-    put(ws, r, 10, f"{H0}A {_is_h['np_p'][-1]/_rev_h[-1]:.1%}", 'g', size=9)
+    put(ws, r, NOTE_COL, f"{H0}A {_is_h['np_p'][-1]/_rev_h[-1]:.1%}", 'g', size=9)
     I['npm'] = r; r += 1
     isf('eps', 'EPS(元/股)', lambda y: f"={YC[y]}{I['np_p']}/{EQs}!$C${Q['shares']}", f'=归母/稀释股数(Equity_Roll页, 现={cfg.v("market.shares")/100:.2f}亿股)', PS)
     isf('ebit', 'EBIT (利润总额+财务费用)', lambda y: f"={YC[y]}{I['tprofit']}+{YC[y]}{I['fin']}", '供DCF页FCFF计算', NUM, True)
@@ -1077,12 +1123,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 28
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 66
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 66
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注 / 来源', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注 / 来源', 't', bold=True)
 
     B = {}
     r = 4
@@ -1095,7 +1141,7 @@ def build(cfg, out_path, addr_path, research=None):
         if fcst_fn is not None:
             for y in FCST:
                 put(ws, r, 2 + YRS.index(y), fcst_fn(y), 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         r += 1
 
     def bsum(key, label, keys, note=''):
@@ -1105,7 +1151,7 @@ def build(cfg, out_path, addr_path, research=None):
             cl = YC[y]
             expr = '+'.join(f"{cl}{B[k]}" for k in keys)
             put(ws, r, 2 + YRS.index(y), f"={expr}", 'f', NUM, bold=True, fill=TOT_FILL)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         B[key] = r
         r += 1
 
@@ -1138,7 +1184,7 @@ def build(cfg, out_path, addr_path, research=None):
         cl = YC[y]
         put(ws, r, 2 + YRS.index(y), f"={cl}{B['tca']}+{cl}{B['tnca']}", 'f', NUM, bold=True, fill=TOT_FILL)
     _ta_h0 = sum(_bs[k][-1] for k in _A_K)
-    put(ws, r, 10, f'{H0}A {_ta_h0/100:.1f}亿', 'g', size=9)
+    put(ws, r, NOTE_COL, f'{H0}A {_ta_h0/100:.1f}亿', 'g', size=9)
     B['ta'] = r; r += 1
     brow('stl', '短期借款', _bs['stl'], lambda y: f"={FINs}!{YC[y]}{F['st_t1']}", '预测=FIN revolver期末(缺口新增-sweep偿还)')
     brow('ap', '应付票据及应付账款', _bs['ap'],
@@ -1191,7 +1237,7 @@ def build(cfg, out_path, addr_path, research=None):
     for y in YRS:
         cl = YC[y]
         put(ws, r, 2 + YRS.index(y), f"={cl}{B['ta']}-{cl}{B['tle']}", 'f', NUM, bold=True, fill=CHK_FILL)
-    put(ws, r, 10, '应恒=0(容差0.01); Checks页汇总校验', 'g', size=9)
+    put(ws, r, NOTE_COL, '应恒=0(容差0.01); Checks页汇总校验', 'g', size=9)
     B['chk'] = r; r += 1
     BSs = 'BS'
 
@@ -1205,12 +1251,12 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 30
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 66
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 66
     ws.freeze_panes = 'B4'
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注 / 来源', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注 / 来源', 't', bold=True)
 
     C = {}
     r = 4
@@ -1223,18 +1269,13 @@ def build(cfg, out_path, addr_path, research=None):
             if fcst_fn is not None:
                 for y in FCST:
                     put(ws, r, 2 + YRS.index(y), fcst_fn(y), 'f', NUM, bold=bold)
-        elif fcst_fn == 'dash':
-            for i in range(NH):
-                put(ws, r, 2 + i, '—', 'g', align='center')
-            for y in FCST:
-                put(ws, r, 2 + YRS.index(y), '—', 'g', align='center')
         else:
             for i in range(NH):
                 put(ws, r, 2 + i, '—', 'g', align='center')
             if fcst_fn is not None:
                 for y in FCST:
                     put(ws, r, 2 + YRS.index(y), fcst_fn(y), 'f', NUM, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         C[key] = r
         r += 1
 
@@ -1263,7 +1304,7 @@ def build(cfg, out_path, addr_path, research=None):
             put(ws, r, 2 + YRS.index(y), f"={BSs}!{YC[H0]}{B['cash']}", 'f', NUM)
         else:
             put(ws, r, 2 + YRS.index(y), f"={YC[y-1]}{r + 1}", 'f', NUM)
-    put(ws, r, 10, f'{F0}期初={H0}A末货币资金', 'g', size=9)
+    put(ws, r, NOTE_COL, f'{F0}期初={H0}A末货币资金', 'g', size=9)
     C['cash0'] = r; r += 1
     crow('cash1', '期末货币资金(=BS货币资金)', _cf_h['cash1'],
          lambda y: f"={YC[y]}{C['cash0']}+{YC[y]}{C['dcash']}", '历史=BS货币资金; 预测=期初+净增加=FIN期末现金(最低现金)', True)
@@ -1272,10 +1313,10 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     # 回填 Schedules / PPE / FIN / Equity_Roll 全部公式
     # ============================================================
-    ws = wb[SCH]
-    def srow_fill(sheet, key, hist_fn, fcst_fn, fmt=NUM):
-        rr = sheet[key]
-        w = wb[SCH] if sheet is S else wb[PPEs] if sheet is P else wb[FINs] if sheet is F else wb[EQs]
+    wS = wb[SCH]
+    def srow_fill(w, rows, key, hist_fn, fcst_fn, fmt=NUM):
+        """H3: 显式传worksheet(w)与行号dict(rows), 不再按dict身份反查所属sheet"""
+        rr = rows[key]
         if hist_fn:
             for y in HIST:
                 put(w, rr, 2 + YRS.index(y), hist_fn(y), 'f', fmt)
@@ -1285,21 +1326,21 @@ def build(cfg, out_path, addr_path, research=None):
     # --- Schedules: NWC 引用BS ---
     for key, bk in [('ar', 'ar'), ('pre', 'pre'), ('orec', 'orec'), ('inv', 'inv'),
                     ('ap', 'ap'), ('contract', 'contract'), ('staff', 'staff'), ('taxp', 'taxp'), ('opay', 'opay')]:
-        srow_fill(S, key, lambda y, bk=bk: f"={BSs}!{YC[y]}{B[bk]}",
+        srow_fill(wS, S, key, lambda y, bk=bk: f"={BSs}!{YC[y]}{B[bk]}",
                   lambda y, bk=bk: f"={BSs}!{YC[y]}{B[bk]}")
-    srow_fill(S, 'nwc_a', lambda y: f"=SUM({YC[y]}{S['ar']}:{YC[y]}{S['inv']})",
+    srow_fill(wS, S, 'nwc_a', lambda y: f"=SUM({YC[y]}{S['ar']}:{YC[y]}{S['inv']})",
               lambda y: f"=SUM({YC[y]}{S['ar']}:{YC[y]}{S['inv']})")
-    srow_fill(S, 'nwc_l', lambda y: f"=SUM({YC[y]}{S['ap']}:{YC[y]}{S['opay']})",
+    srow_fill(wS, S, 'nwc_l', lambda y: f"=SUM({YC[y]}{S['ap']}:{YC[y]}{S['opay']})",
               lambda y: f"=SUM({YC[y]}{S['ap']}:{YC[y]}{S['opay']})")
-    srow_fill(S, 'nwc', lambda y: f"={YC[y]}{S['nwc_a']}-{YC[y]}{S['nwc_l']}",
+    srow_fill(wS, S, 'nwc', lambda y: f"={YC[y]}{S['nwc_a']}-{YC[y]}{S['nwc_l']}",
               lambda y: f"={YC[y]}{S['nwc_a']}-{YC[y]}{S['nwc_l']}")
-    srow_fill(S, 'dnwc', None, lambda y: f"={YC[y]}{S['nwc']}-{YC[y-1]}{S['nwc']}")
+    srow_fill(wS, S, 'dnwc', None, lambda y: f"={YC[y]}{S['nwc']}-{YC[y-1]}{S['nwc']}")
     # 无形资产
-    srow_fill(S, 'ia0', None, lambda y: (f"={BSs}!{YC[H0]}{B['ia']}" if y == F0 else f"={YC[y-1]}{S['ia1']}"))
-    srow_fill(S, 'amort', None, lambda y: f"={YC[y]}{S['ia0']}*{ASheet}!$C${A['rt_amort']}")
-    srow_fill(S, 'ia1', None, lambda y: f"={YC[y]}{S['ia0']}-{YC[y]}{S['amort']}")
+    srow_fill(wS, S, 'ia0', None, lambda y: (f"={BSs}!{YC[H0]}{B['ia']}" if y == F0 else f"={YC[y-1]}{S['ia1']}"))
+    srow_fill(wS, S, 'amort', None, lambda y: f"={YC[y]}{S['ia0']}*{ASheet}!$C${A['rt_amort']}")
+    srow_fill(wS, S, 'ia1', None, lambda y: f"={YC[y]}{S['ia0']}-{YC[y]}{S['amort']}")
     # 股利
-    srow_fill(S, 'div', None, lambda y: f"={ISs}!{YC[y-1]}{I['np_p']}*{ASheet}!{AC[y]}${A['payout']}")
+    srow_fill(wS, S, 'div', None, lambda y: f"={ISs}!{YC[y-1]}{I['np_p']}*{ASheet}!{AC[y]}${A['payout']}")
 
     # --- PPE ---
     # fa0/cip0 的F0期初为绿色输入(H0实际拆分), 以后年度=上年期末
@@ -1307,23 +1348,23 @@ def build(cfg, out_path, addr_path, research=None):
     put(wP, P['fa0'], 2 + YRS.index(F0), _fa_net0, 'x', NUM)
     for y in FCST[1:]:
         put(wP, P['fa0'], 2 + YRS.index(y), f"={YC[y-1]}{P['fa1']}", 'f', NUM)
-    put(wP, P['fa0'], 10, f'{F0}期初={H0}A固定资产{_fa_net0/100:.1f}亿(绿色输入, {H0}年报)', 'g', size=9)
+    put(wP, P['fa0'], NOTE_COL, f'{F0}期初={H0}A固定资产{_fa_net0/100:.1f}亿(绿色输入, {H0}年报)', 'g', size=9)
     put(wP, P['cip0'], 2 + YRS.index(F0), _cip0, 'x', NUM)
     for y in FCST[1:]:
         put(wP, P['cip0'], 2 + YRS.index(y), f"={YC[y-1]}{P['cip1']}", 'f', NUM)
-    put(wP, P['cip0'], 10, f'{F0}期初={H0}A在建工程{_cip0/100:.1f}亿(绿色输入); {_fa_net0:.1f}+{_cip0:.1f}={_fa_net0+_cip0:.1f}与BS一致', 'g', size=9)
-    srow_fill(P, 'capex', None, lambda y: f"={ISs}!{YC[y]}{I['rev']}*{ASheet}!{AC[y]}${A['rt_capex']}")
-    srow_fill(P, 'trans', None, lambda y: f"=({YC[y]}{P['cip0']}+{YC[y]}{P['capex']})*{ASheet}!$C${A['rt_trans']}")
-    srow_fill(P, 'dep', None, lambda y: f"={YC[y]}{P['fa0']}*{ASheet}!$C${A['rt_dep']}+{YC[y]}{P['trans']}*{ASheet}!$C${A['rt_dep_new']}")
-    srow_fill(P, 'disp', None, lambda y: f"={YC[y]}{P['fa0']}*{ASheet}!$C${A['rt_disp']}")
-    srow_fill(P, 'fa1', None, lambda y: f"={YC[y]}{P['fa0']}+{YC[y]}{P['trans']}-{YC[y]}{P['dep']}-{YC[y]}{P['disp']}")
-    srow_fill(P, 'cip1', None, lambda y: f"={YC[y]}{P['cip0']}+{YC[y]}{P['capex']}-{YC[y]}{P['trans']}")
-    srow_fill(P, 'ppe1', lambda y: f"={BSs}!{YC[y]}{B['ppe']}",
+    put(wP, P['cip0'], NOTE_COL, f'{F0}期初={H0}A在建工程{_cip0/100:.1f}亿(绿色输入); {_fa_net0:.1f}+{_cip0:.1f}={_fa_net0+_cip0:.1f}与BS一致', 'g', size=9)
+    srow_fill(wP, P, 'capex', None, lambda y: f"={ISs}!{YC[y]}{I['rev']}*{ASheet}!{AC[y]}${A['rt_capex']}")
+    srow_fill(wP, P, 'trans', None, lambda y: f"=({YC[y]}{P['cip0']}+{YC[y]}{P['capex']})*{ASheet}!$C${A['rt_trans']}")
+    srow_fill(wP, P, 'dep', None, lambda y: f"={YC[y]}{P['fa0']}*{ASheet}!$C${A['rt_dep']}+{YC[y]}{P['trans']}*{ASheet}!$C${A['rt_dep_new']}")
+    srow_fill(wP, P, 'disp', None, lambda y: f"={YC[y]}{P['fa0']}*{ASheet}!$C${A['rt_disp']}")
+    srow_fill(wP, P, 'fa1', None, lambda y: f"={YC[y]}{P['fa0']}+{YC[y]}{P['trans']}-{YC[y]}{P['dep']}-{YC[y]}{P['disp']}")
+    srow_fill(wP, P, 'cip1', None, lambda y: f"={YC[y]}{P['cip0']}+{YC[y]}{P['capex']}-{YC[y]}{P['trans']}")
+    srow_fill(wP, P, 'ppe1', lambda y: f"={BSs}!{YC[y]}{B['ppe']}",
               lambda y: f"={YC[y]}{P['fa1']}+{YC[y]}{P['cip1']}")
-    srow_fill(P, 'da', lambda y: f"={CFs}!{YC[y]}{C['da']}",
+    srow_fill(wP, P, 'da', lambda y: f"={CFs}!{YC[y]}{C['da']}",
               lambda y: f"={YC[y]}{P['dep']}+{SCH}!{YC[y]}{S['amort']}")
-    srow_fill(P, 'dep_rt', None, lambda y: f"={YC[y]}{P['dep']}/{YC[y]}{P['fa0']}", PCT)
-    srow_fill(P, 'dep_yrs', None, lambda y: f"={YC[y]}{P['fa0']}/{YC[y]}{P['dep']}", '0.0"年"')
+    srow_fill(wP, P, 'dep_rt', None, lambda y: f"={YC[y]}{P['dep']}/{YC[y]}{P['fa0']}", PCT)
+    srow_fill(wP, P, 'dep_yrs', None, lambda y: f"={YC[y]}{P['fa0']}/{YC[y]}{P['dep']}", '0.0"年"')
 
     # --- FIN ---
     wF = wb[FINs]
@@ -1406,11 +1447,12 @@ def build(cfg, out_path, addr_path, research=None):
         itf(k, 'intinc_in', lambda y, k=k: (
             f"={YC[y]}{F['cash0']}*{ASheet}!$C${A['rt_cash']}" if k == 1 else f"={YC[y]}{IT[k-1]['intinc_out']}"))
         itf(k, 'finnet_in', lambda y, k=k: f"={YC[y]}{IT[k]['intexp_in']}-{YC[y]}{IT[k]['intinc_in']}+{YC[y]}{F['finoth']}")
-        # 归母净利重算: (毛利-税金附加-三费+其他经营损益+营业外-财务费用净额)×(1-t); 只引用IS中fin之前的无环行
+        # 归母净利重算: (毛利-税金附加-三费+其他经营损益+营业外-财务费用净额)×(1-t)×(1-mi_share);
+        # 只引用IS中fin之前的无环行; A1: ×(1-mi_share)与IS归母口径一致, mi_share=0时数值恒等
         itf(k, 'np', lambda y, k=k: (
             f"=({ISs}!{YC[y]}{I['gp']}-{ISs}!{YC[y]}{I['taxadd']}-{ISs}!{YC[y]}{I['sale']}-{ISs}!{YC[y]}{I['adm']}"
             f"-{ISs}!{YC[y]}{I['rd']}+{ISs}!{YC[y]}{I['othop']}+{ISs}!{YC[y]}{I['nonop']}-{YC[y]}{IT[k]['finnet_in']})"
-            f"*(1-{ASheet}!{AC[y]}${A['tax']})"))
+            f"*(1-{ASheet}!{AC[y]}${A['tax']})*(1-{ASheet}!{AC[y]}${A['mi_share']})"))
         itf(k, 'ocf', lambda y, k=k: f"={YC[y]}{IT[k]['np']}+{PPEs}!{YC[y]}{P['da']}+{YC[y]}{IT[k]['intexp_in']}-{SCH}!{YC[y]}{S['dnwc']}")
         itf(k, 'cpre', lambda y, k=k: (f"={YC[y]}{F['cash0']}+{YC[y]}{IT[k]['ocf']}+{YC[y]}{F['icf']}"
                                        f"+{YC[y]}{F['div']}-{YC[y]}{IT[k]['intexp_in']}+{YC[y]}{F['rep']}"))
@@ -1483,11 +1525,11 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 32
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 60
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 60
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in FCST:
         put(ws, 3, 2 + YRS.index(y), f'{y}E', 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     D = {}
     r = 4
@@ -1496,7 +1538,7 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, label, 't', bold=bold)
         for y in FCST:
             put(ws, r, 2 + YRS.index(y), fn(y), 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         D[key] = r
         r += 1
 
@@ -1519,7 +1561,7 @@ def build(cfg, out_path, addr_path, research=None):
         nonlocal r
         put(ws, r, 1, label, 't', bold=bold)
         put(ws, r, 4, formula, 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         D[key] = r
         r += 1
 
@@ -1541,7 +1583,7 @@ def build(cfg, out_path, addr_path, research=None):
     dcell('ipe', f'隐含{F0}E P/E', f"=D{D['eq']}/{ISs}!{YC[F0]}{I['np_p']}", MULT, False, f'=股权价值/{F0}E归母')
     dcell('iev', f'隐含{F0}E EV/EBITDA', f"=D{D['ev']}/({ISs}!{YC[F0]}{I['ebit']}+{PPEs}!{YC[F0]}{P['da']})", MULT)
     put(ws, r, 1, f'注: 估值基准日{VAL_DATE}, 与{F0}财年现金流起点存在时间错位; 年中折现(t=0.5起)为该错位的标准近似处理, 不再单独做stub调整', 'g', size=9)
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
     r += 1
     DCFs = 'DCF'
 
@@ -1551,15 +1593,15 @@ def build(cfg, out_path, addr_path, research=None):
     ws = wb.create_sheet('FCFE')
     title_bar(ws, f'{NAME} — FCFE 股权自由现金流估值 (Ke折现, 与FCFF双视图)',
               f'单位: {UNIT} | FCFE=归母净利+D&A-ΔNWC-Capex+净新增借款(FIN页调度); 按股权成本Ke折现(年中口径与DCF页一致), '
-              '直接得归母股权价值(少数股东权益见DCF页EV→Equity桥); 终值取正常化FCFE(净新增借款按g封顶)')
+              '直接得归母股权价值(少数股东权益见DCF页EV→Equity桥); 终值取正常化FCFE(净新增借款按D×g稳态正常化)')
     ws.column_dimensions['A'].width = 32
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 60
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 60
     put(ws, 3, 1, '项目', 't', bold=True)
     for y in FCST:
         put(ws, 3, 2 + YRS.index(y), f'{y}E', 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '备注', 't', bold=True)
+    put(ws, 3, NOTE_COL, '备注', 't', bold=True)
 
     E = {}
     r = 4
@@ -1568,7 +1610,7 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, label, 't', bold=bold)
         for y in FCST:
             put(ws, r, 2 + YRS.index(y), fn(y), 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         E[key] = r
         r += 1
 
@@ -1592,15 +1634,18 @@ def build(cfg, out_path, addr_path, research=None):
         nonlocal r
         put(ws, r, 1, label, 't', bold=bold)
         put(ws, r, 4, formula, 'f', fmt, bold=bold)
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         E[key] = r
         r += 1
 
     ecell('pv_sum', f'显性期PV合计 ({F0}-{F1})', f"=SUM({YC[F0]}{E['pv']}:{YC[F1]}{E['pv']})", NUM, True)
+    # A3: 终值净新增借款按 D×g 稳态正常化(对称处理, 不再MIN单边封顶) —
+    #     大额净融资与大额净偿还均不应被Gordon公式永续外推
     ecell('fcfe_n', f'正常化FCFE ({F1}E, 终值口径)',
-          f"={YC[F1]}{E['fcfe']}-{YC[F1]}{E['ddebt']}+MIN({YC[F1]}{E['ddebt']},{FINs}!{YC[F1]}{F['dtot1']}*TERM_G)",
+          f"={YC[F1]}{E['fcfe']}-{YC[F1]}{E['ddebt']}+{FINs}!{YC[F1]}{F['dtot1']}*TERM_G",
           NUM, False,
-          f'净新增借款按g封顶: 终值内净新增借款取MIN(实际调度, {F1}E期末有息负债×g), 防止显性期末大额净融资被Gordon公式永续外推; 去杠杆/平稳年(实际≤封顶值)维持实际调度不变')
+          f'终值净借款按D×g稳态正常化: 终值年净新增借款={F1}E期末有息负债×g(替代实际调度值, '
+          '对称防止显性期末大额净融资/净偿还被Gordon公式永续外推)')
     ecell('tv', '终值 TV (Gordon, 正常化FCFE)', f"=D{E['fcfe_n']}*(1+TERM_G)/(KE-TERM_G)", NUM, False,
           f'=正常化FCFE{F1}×(1+g)/(Ke-g); Ke/g均为named range')
     ecell('pv_tv', 'PV(终值)', f"=D{E['tv']}*{YC[F1]}{E['df']}", NUM, False, f'终值按t={NF-0.5}折现(与DCF页一致)')
@@ -1609,7 +1654,7 @@ def build(cfg, out_path, addr_path, research=None):
     ecell('ps_fcff', '对照: FCFF口径每股价值 (元)', f"={DCFs}!D{D['ps']}", PS, False, '=DCF页主输出')
     ecell('diff', '两法差异 (FCFE/FCFF-1)', f"=D{E['ps']}/D{E['ps_fcff']}-1", PCT, True, ' Checks页含一致性信息行')
     put(ws, r, 1, '两法差异原因', 't', bold=True)
-    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=NOTE_COL)
     put(ws, r, 2, '①折现率不同: FCFF按WACC(全资本成本, 税盾在分母)折现, FCFE按Ke(纯股权成本)折现; '
                   '②口径不同: FCFF为企业自由现金流, 须经EV→Equity桥加回净现金/扣有息负债/扣少数股东权益, FCFE基于归母净利折现、'
                   '直接对应归母股权价值, 少数股东权益已在DCF页EV→Equity桥扣除, 本页无需再扣; '
@@ -1681,16 +1726,22 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 2, CODE_FULL, 'g', align='center')
     put(ws, r, 3, f"={ASheet}!$C${A['mcap']}/100", 'f', NUM)
     put(ws, r, 4, cfg.v('market.pe_ttm'), 'x', MULT)
-    put(ws, r, 5, f"={ASheet}!$C${A['c_np26']}/100", 'f', NUM)
+    put(ws, r, 5, f"={ASheet}!$C${A[f'c_np{_cy[0]}']}/100", 'f', NUM)
     put(ws, r, 6, f"=C{r}/E{r}", 'f', MULT, bold=True)
-    put(ws, r, 7, f"={ASheet}!$C${A['c_np27']}/100", 'f', NUM)
+    put(ws, r, 7, f"={ASheet}!$C${A[f'c_np{_cy[1]}']}/100", 'f', NUM)
     put(ws, r, 8, f"=C{r}/G{r}", 'f', MULT)
     put(ws, r, 11, f'{F0}E/{F0+1}E归母=一致预期; {cfg.v("market.pe_ttm_basis", "")}', 'g', size=9, wrap=True)
     SH_ROW = r
     r += 2
     sec(ws, r, f'{NAME}定价 (基于模型基准{F0}E归母)', 15); r += 1
     _pe_lo_e = cfg.e('relative_val.target_pe_lo')
-    put(ws, r, 1, '目标PE下限', 't'); put(ws, r, 3, _pe_lo_e['values'], 'in', MULT)
+    # F5: 经_norm_entry规整后 list/{values:[...]} 取首元素为float标量,
+    #     避免openpyxl写list报ValueError与后续:g格式化TypeError
+    _pe_lo_v = _pe_lo_e['values']
+    if isinstance(_pe_lo_v, (list, tuple)):
+        _pe_lo_v = _pe_lo_v[0]
+    _pe_lo_v = float(_pe_lo_v)
+    put(ws, r, 1, '目标PE下限', 't'); put(ws, r, 3, _pe_lo_v, 'in', MULT)
     put(ws, r, 11, _pe_lo_e['basis'], 'g', size=9)
     PE_LO = r; r += 1
     put(ws, r, 1, '目标PE上限', 't')
@@ -1710,12 +1761,12 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 3, f"=C{PE_HI}*C{NP26}/{SH_REF}", 'f', PS, bold=True)
     P_HI = r; r += 1
     put(ws, r, 1, f'以一致预期{F0}E归母{cons_np_v[0]/100:.1f}亿计股价区间(元)', 't')
-    put(ws, r, 3, f"=C{PE_LO}*{ASheet}!$C${A['c_np26']}/{SH_REF}", 'f', PS)
-    put(ws, r, 4, f"=C{PE_HI}*{ASheet}!$C${A['c_np26']}/{SH_REF}", 'f', PS)
+    put(ws, r, 3, f"=C{PE_LO}*{ASheet}!$C${A[f'c_np{_cy[0]}']}/{SH_REF}", 'f', PS)
+    put(ws, r, 4, f"=C{PE_HI}*{ASheet}!$C${A[f'c_np{_cy[0]}']}/{SH_REF}", 'f', PS)
     put(ws, r, 11, '左=PE下限, 右=PE上限', 'g', size=9)
     P_CONS_LO = r
     r += 1
-    put(ws, r, 1, f'相对现价{cfg.v("market.price")}元空间', 't')
+    put(ws, r, 1, f'相对现价{_px_val}元空间', 't')   # F1: 现价与Assumptions采用值同源(含price_hkd/fx折算口径)
     put(ws, r, 3, f"=C{P_LO}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     put(ws, r, 4, f"=C{P_HI}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     r += 1
@@ -1793,16 +1844,24 @@ def build(cfg, out_path, addr_path, research=None):
     r += 2
 
     _dpo_deltas = cfg.get('sensitivity.dpo_deltas') or [-40, -20, 0, 20, 40]
+    # E4: δ=0为DCF基准锚点(DPO_CENTER引用), 配置不含0时自动补0; 排序去重保证行序与锚点恒存在
+    _dpo_deltas = sorted(set(_dpo_deltas) | {0})
     _dpo_path = a5('working_capital.dpo')
     sec(ws, r, '矩阵三: DPO单维敏感性 — 应付天数变动 × DCF每股价值', 9); r += 1
     put(ws, r, 1, 'DPO变动(天) \\ 每股价值', 't', bold=True, align='center')
     put(ws, r, 3, '每股价值(元)', 't', bold=True, align='center')
     put(ws, r, 4, 'vs基准', 't', bold=True, align='center')
-    put(ws, r, 9, '机制: DPO变动δ→应付变动→ΔNWC变动→FCFF一阶调整; 未反映利息二阶效应(金额小); δ=0格=DCF基准', 'g', size=9, wrap=True)
+    put(ws, r, 9, '机制: DPO变动δ→应付变动→ΔNWC变动→FCFF一阶调整; 首年按全额COGS重定价, 以后年按ΔCOGS; '
+                  '未反映利息二阶效应(金额小); δ=0格=DCF基准', 'g', size=9, wrap=True)
     r += 1
+    # A2: 第一预测年应付重定价基数=全额COGS_F0 (AP_{H0}为既成事实, δ作用于F0全部应付重建),
+    #     后续年保持年际差分(ΔCOGS); δ=0行不受影响, 仍恒等于DCF基准
     dcogs = {}
     for y in FCST:
-        dcogs[y] = f"({ISs}!{YC[y]}${I['cost']}-{ISs}!{YC[y-1]}${I['cost']})"
+        if y == F0:
+            dcogs[y] = f"({ISs}!{YC[y]}${I['cost']})"
+        else:
+            dcogs[y] = f"({ISs}!{YC[y]}${I['cost']}-{ISs}!{YC[y-1]}${I['cost']})"
     DPO_CENTER = None
     for dpo_d in _dpo_deltas:
         put(ws, r, 2, dpo_d, 'in', DAYS, bold=True)
@@ -1818,7 +1877,8 @@ def build(cfg, out_path, addr_path, research=None):
         if dpo_d == 0:
             DPO_CENTER = f"C{r}"
         r += 1
-    put(ws, r, 1, f'DPO每±20天≈FCFF±(Δ营业成本×20/365); 基准DPO路径见Assumptions({_dpo_path[0]:.0f}→{_dpo_path[-1]:.0f}天)', 'g', size=9)
+    put(ws, r, 1, f'DPO每±20天: 首年≈FCFF±(营业成本×20/365), 以后年≈±(Δ营业成本×20/365); '
+                  f'基准DPO路径见Assumptions({_dpo_path[0]:.0f}→{_dpo_path[-1]:.0f}天)', 'g', size=9)
     SENs = 'Sensitivity'
 
     # ============================================================
@@ -1830,16 +1890,16 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 26
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 56
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 56
     put(ws, 3, 1, '情景开关当前值', 't', bold=True)
     put(ws, 3, 2, f"={ASheet}!$C${A['sw']}", 'f', '0', bold=True)
     put(ws, 3, 3, '=CHOOSE(B3,"熊市","基准","牛市")', 'f', align='center')
-    put(ws, 3, 10, '主模型(IS/BS/CF/FIN/DCF)随开关切换; 本页基准=主模型当前输出, 熊/牛为独立简化演算', 'g', size=9)
+    put(ws, 3, NOTE_COL, '主模型(IS/BS/CF/FIN/DCF)随开关切换; 本页基准=主模型当前输出, 熊/牛为独立简化演算', 'g', size=9)
 
     # NWC密度 rho (基准NWC_F0/收入_F0)
     put(ws, 4, 1, '基准NWC/收入密度ρ', 't')
     put(ws, 4, 2, f"={SCH}!{YC[F0]}{S['nwc']}/{ISs}!{YC[F0]}{I['rev']}", 'f', PCT)
-    put(ws, 4, 10, '情景页ΔNWC=收入增量×ρ(负密度=现金流来源); 仅熊/牛简化法使用', 'g', size=9)
+    put(ws, 4, NOTE_COL, '情景页ΔNWC=收入增量×ρ(负密度=现金流来源); 仅熊/牛简化法使用', 'g', size=9)
     RHO = '$B$4'
 
     scen_rows = {}
@@ -1865,9 +1925,10 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, '归母净利率', 't')
         for y in FCST:
             cl = YC[y]
+            # A1: 简化法净利率同步×(1-mi_share)保持归母口径, mi_share=0时数值恒等
             f = (f"=({RS}!{cl}{BASE_GM}+{ADJM}-{ASheet}!{AC[y]}${A['rt_taxadd']}-{ASheet}!{AC[y]}${A['rt_sale']}"
                  f"-{ASheet}!{AC[y]}${A['rt_adm']}-{ASheet}!{AC[y]}${A['rt_rd']}-{ASheet}!$C${A['oth_rt']})"
-                 f"*(1-{ASheet}!{AC[y]}${A['tax']})")
+                 f"*(1-{ASheet}!{AC[y]}${A['tax']})*(1-{ASheet}!{AC[y]}${A['mi_share']})")
             put(ws, r, 2 + YRS.index(y), f, 'f', PCT)
         rows['npm'] = r; r += 1
         put(ws, r, 1, '归母净利润', 't')
@@ -1885,13 +1946,13 @@ def build(cfg, out_path, addr_path, research=None):
         if skey == 'base':
             put(ws, r, 1, 'DCF每股价值(元) =主模型', 't', bold=True)
             put(ws, r, 2, f"={DCFs}!D{D['ps']}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, 10, '基准直接引用主模型DCF输出(情景开关=2时即基准口径), 不再独立演算', 'g', size=9)
+            put(ws, r, NOTE_COL, '基准直接引用主模型DCF输出(情景开关=2时即基准口径), 不再独立演算', 'g', size=9)
             rows['ps'] = r; r += 1
             put(ws, r, 1, '相对估值股价(元) =主模型归母', 't', bold=True)
             put(ws, r, 2, f"={ISs}!{YC[F0]}{I['np_p']}*{REL_MED_PE}/{SH_REF}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, 10, f'=主模型{F0}E归母(IS)×可比中位{F0}E PE/稀释股数', 'g', size=9)
+            put(ws, r, NOTE_COL, f'=主模型{F0}E归母(IS)×可比中位{F0}E PE/稀释股数', 'g', size=9)
             rows['rel'] = r; r += 1
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
             put(ws, r, 1, '  桥接说明: 上方基准收入/净利率/FCFF行为简化法演算(供与熊/牛同口径对比), 其估值行已被主模型输出替代; '
                           '简化法与主模型的差异主要来自: ①财务费用(主模型=FIN平均余额计息, 简化法=固定费用率) ②ΔNWC(主模型=逐项天数驱动, 简化法=密度ρ近似) ③折旧/资本开支口径一致',
                 'g', size=9, wrap=True)
@@ -1905,11 +1966,11 @@ def build(cfg, out_path, addr_path, research=None):
                  f"+{YC[F1]}{fcff}*(1+{TG_REF})/({WACC_REF}-{TG_REF})/(1+{WACC_REF})^{NF-0.5}"
                  f"+DCF!$D${D['netadj']})/{SH_REF}")
             put(ws, r, 2, f, 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, 10, '简化净利率法+年中折现; WACC/g/净现金调整与DCF页一致; 与主模型差异见基准块桥接说明', 'g', size=9)
+            put(ws, r, NOTE_COL, '简化净利率法+年中折现; WACC/g/净现金调整与DCF页一致; 与主模型差异见基准块桥接说明', 'g', size=9)
             rows['ps'] = r; r += 1
             put(ws, r, 1, '相对估值股价(元)', 't', bold=True)
             put(ws, r, 2, f"={YC[F0]}{rows['np']}*{REL_MED_PE}/{SH_REF}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, 10, f'=情景{F0}E归母×可比中位{F0}E PE/稀释股数', 'g', size=9)
+            put(ws, r, NOTE_COL, f'=情景{F0}E归母×可比中位{F0}E PE/稀释股数', 'g', size=9)
             rows['rel'] = r; r += 1
         scen_rows[skey] = rows
         r += 1
@@ -1955,7 +2016,7 @@ def build(cfg, out_path, addr_path, research=None):
         c.fill = TOT_FILL
     r += 1
     FF_FIRST = r
-    _pe_lo_v = _pe_lo_e['values']
+    # F5: _pe_lo_v 已在Relative_Val区规整为float标量, 此处直接复用
     _pe_band = f'PE {_pe_lo_v:g}x ~ 可比中位'
     ff_rows = [
         ('DCF绝对估值 — 基准', '主模型(当前情景)', f"={DCFs}!D{D['ps']}", f"={DCFs}!D{D['ps']}", 'FCFF+Gordon终值, 年中折现, WACC采用值'),
@@ -2037,11 +2098,11 @@ def build(cfg, out_path, addr_path, research=None):
     ws.column_dimensions['A'].width = 40
     for y in YRS:
         ws.column_dimensions[YC[y]].width = 11
-    ws.column_dimensions['J'].width = 50
+    ws.column_dimensions[get_column_letter(NOTE_COL)].width = 50
     put(ws, 3, 1, '校验项', 't', bold=True)
     for y in YRS:
         put(ws, 3, 2 + YRS.index(y), (f'{y}A' if y in HIST else f'{y}E'), 't', bold=True, align='center').fill = TOT_FILL
-    put(ws, 3, 10, '说明', 't', bold=True)
+    put(ws, 3, NOTE_COL, '说明', 't', bold=True)
 
     r = 4
     CHK_SUM = []
@@ -2051,7 +2112,7 @@ def build(cfg, out_path, addr_path, research=None):
         for y in years:
             put(ws, r, 2 + YRS.index(y), fn(y), 'f', 'General', align='center')
         cl0 = YC[years[0]]; cl1 = YC[years[-1]]
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         CHK_SUM.append(f"{cl0}{r}:{cl1}{r}")
         r += 1
 
@@ -2059,7 +2120,7 @@ def build(cfg, out_path, addr_path, research=None):
         nonlocal r
         put(ws, r, 1, label, 't')
         put(ws, r, 2, formula, 'f', align='center')
-        put(ws, r, 10, note, 'g', size=9)
+        put(ws, r, NOTE_COL, note, 'g', size=9)
         CHK_SUM.append(f"B{r}")
         r += 1
 
@@ -2071,8 +2132,16 @@ def build(cfg, out_path, addr_path, research=None):
            'Equity_Roll滚动勾稽')
     chkrow('4. IS收入=Revenue_Segments合计', lambda y: f"=ABS({ISs}!{YC[y]}{I['rev']}-{RS}!{YC[y]}{REV_TOT})<0.01", YRS,
            '分部合计自动汇总进IS')
-    chkrow('5. 毛利率处于(0,60%)合理区间', lambda y: f"=AND({ISs}!{YC[y]}{I['gm']}>0,{ISs}!{YC[y]}{I['gm']}<0.6)", YRS,
-           '防止假设越界')
+    # E5: 毛利率带宽改为"信息行", 不进CHK_SUM布尔汇总 — 高/低毛利行业越界不应闸门全簿;
+    #     区间从 checks.gm_band 读取(默认[0,0.6], 与原硬编码等值)
+    _gm_band = cfg.get('checks.gm_band') or [0.0, 0.6]
+    put(ws, r, 1, f'5. 信息项(不闸门): 毛利率处于({_gm_band[0]:.0%},{_gm_band[1]:.0%})区间', 't')
+    for y in YRS:
+        put(ws, r, 2 + YRS.index(y),
+            f"=AND({ISs}!{YC[y]}{I['gm']}>{_gm_band[0]:g},{ISs}!{YC[y]}{I['gm']}<{_gm_band[1]:g})",
+            'f', 'General', align='center')
+    put(ws, r, NOTE_COL, '信息行, 不参与布尔汇总; 越界仅提示复核毛利率假设; 区间可经checks.gm_band配置', 'g', size=9)
+    r += 1
     chkcell('6. DCF每股价值>0', f"={DCFs}!D{D['ps']}>0", 'DCF页引用校验')
     chkcell('7. Sensitivity矩阵一中心格=DCF每股价值', f"=ABS({SENs}!{M1_CENTER}-{DCFs}!D{D['ps']})<0.01",
             '矩阵轴自动对中WACC采用值/g, 中心格恒等于DCF输出')
@@ -2092,29 +2161,29 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '信息项: 隐含折旧率(折旧/期初固资净值)', 't')
     for y in FCST:
         put(ws, r, 2 + YRS.index(y), f"={PPEs}!{YC[y]}{P['dep_rt']}", 'f', PCT, align='center')
-    put(ws, r, 10, '信息行: 合理带宽8%-18%', 'g', size=9); r += 1
+    put(ws, r, NOTE_COL, '信息行: 合理带宽8%-18%', 'g', size=9); r += 1
     put(ws, r, 1, f'信息项: {F0}E模型收入/一致预期', 't')
-    put(ws, r, 2, f"={ISs}!{YC[F0]}{I['rev']}/{ASheet}!$C${A['c_rev26']}", 'f', PCT)
-    put(ws, r, 10, '接近100%即基准贴合一致预期', 'g', size=9); r += 1
+    put(ws, r, 2, f"={ISs}!{YC[F0]}{I['rev']}/{ASheet}!$C${A[f'c_rev{_cy[0]}']}", 'f', PCT)
+    put(ws, r, NOTE_COL, '接近100%即基准贴合一致预期', 'g', size=9); r += 1
     put(ws, r, 1, f'信息项: {F0}E模型归母/一致预期', 't')
-    put(ws, r, 2, f"={ISs}!{YC[F0]}{I['np_p']}/{ASheet}!$C${A['c_np26']}", 'f', PCT); r += 1
+    put(ws, r, 2, f"={ISs}!{YC[F0]}{I['np_p']}/{ASheet}!$C${A[f'c_np{_cy[0]}']}", 'f', PCT); r += 1
     put(ws, r, 1, '信息项: WACC计算值/采用值', 't')
     put(ws, r, 2, f"={ASheet}!C{A['wacc_calc']}", 'f', PCT)
     put(ws, r, 3, f"={ASheet}!C{A['wacc']}", 'f', PCT)
-    put(ws, r, 10, '左=计算值, 右=采用值(override为空时两者相等)', 'g', size=9); r += 1
+    put(ws, r, NOTE_COL, '左=计算值, 右=采用值(override为空时两者相等)', 'g', size=9); r += 1
     put(ws, r, 1, '信息项: FCFE/FCFF每股价值比', 't')
     put(ws, r, 2, f"={FCFEs}!D{E['ps']}/{DCFs}!D{D['ps']}", 'f', PCT)
     put(ws, r, 3, f"={FCFEs}!D{E['ps']}", 'f', PS)
-    put(ws, r, 10, '左=FCFE/FCFF比值, 右=FCFE每股(元); 两法差异原因见FCFE页底部注记', 'g', size=9); r += 1
+    put(ws, r, NOTE_COL, '左=FCFE/FCFF比值, 右=FCFE每股(元); 两法差异原因见FCFE页底部注记', 'g', size=9); r += 1
     if TP_ROW:
         put(ws, r, 1, '信息项: 一致预期目标价 vs DCF基准', 't')
         put(ws, r, 2, f"={RVs}!C{TP_ROW}", 'f', PS)
         put(ws, r, 3, f"={RVs}!C{TP_ROW}/{DCFs}!D{D['ps']}-1", 'f', PCT)
-        put(ws, r, 10, '左=目标价(元), 右=目标价较模型DCF溢价; 来源见Relative_Val目标价行', 'g', size=9); r += 1
+        put(ws, r, NOTE_COL, '左=目标价(元), 右=目标价较模型DCF溢价; 来源见Relative_Val目标价行', 'g', size=9); r += 1
     put(ws, r, 1, f'信息项: {F1}E现金 vs 最低现金', 't')
     put(ws, r, 2, f"={BSs}!{YC[F1]}{B['cash']}", 'f', NUM)
     put(ws, r, 3, f"={FINs}!{YC[F1]}{F['mincash']}", 'f', NUM)
-    put(ws, r, 10, '两者应相等(sweep后现金=最低现金, 溢出去理财)', 'g', size=9); r += 2
+    put(ws, r, NOTE_COL, '两者应相等(sweep后现金=最低现金, 溢出去理财)', 'g', size=9); r += 2
 
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
     put(ws, r, 1, '汇总: 全部通过 = ', 't', bold=True, size=14, align='right')
@@ -2159,7 +2228,7 @@ def build(cfg, out_path, addr_path, research=None):
         ('现价 (元)', f"={ASheet}!C{A['px']}"),
         ('总股本 (百万股)', f"={ASheet}!C{A['sh']}"),
         ('总市值 (百万元)', f"={ASheet}!C{A['mcap']}"),
-        (f'一致预期 {F0}E 营收/归母 (百万)', f"=\"营收\"&TEXT({ASheet}!C{A['c_rev26']},\"#,##0\")&\" / 归母\"&TEXT({ASheet}!C{A['c_np26']},\"#,##0\")&\" ({cons_rev['basis']})\""),
+        (f'一致预期 {F0}E 营收/归母 (百万)', f"=\"营收\"&TEXT({ASheet}!C{A[f'c_rev{_cy[0]}']},\"#,##0\")&\" / 归母\"&TEXT({ASheet}!C{A[f'c_np{_cy[0]}']},\"#,##0\")&\" ({cons_rev['basis']})\""),
         ('', ''),
         ('—— 模型输出 (随情景开关联动) ——', ''),
         ('当前情景', f"={SCENs}!C3"),
@@ -2282,10 +2351,9 @@ def build(cfg, out_path, addr_path, research=None):
         build_summary_sheet(wb, research, trows, research.get('memo'), put, title_bar, sec)
         EXTRA_SHEETS.append('研究摘要')
 
-    # ---------- 计算设置 (全簿已无循环引用, 不依赖迭代设置; 保留无害) ----------
-    wb.calculation.iterate = True
-    wb.calculation.iterateCount = 1000
-    wb.calculation.iterateDelta = 0.0001
+    # ---------- 计算设置 ----------
+    # H1: 不开启Excel迭代计算 — 全簿无循环引用, 保持默认(不迭代)可避免掩盖未来意外引入的循环引用;
+    #     仅保留打开时全量重算
     wb.calculation.fullCalcOnLoad = True
 
     # ---------- Named ranges (关键驱动审计轨迹; FCFE/Checks公式已引用) ----------
@@ -2310,6 +2378,7 @@ def build(cfg, out_path, addr_path, research=None):
                  'research_sheets': EXTRA_SHEETS},
         'dcf_ps': f"DCF!D{D['ps']}", 'dcf_upside': f"DCF!D{D['upside']}",
         'dcf_ev': f"DCF!D{D['ev']}", 'dcf_eq': f"DCF!D{D['eq']}",
+        'dcf_tidx': f"DCF!{YC[F0]}{D['t_idx']}",   # E3: 折现年序行首个预测年单元格(verify端读行号)
         'fcfe_ps': f"FCFE!D{E['ps']}", 'fcfe_eq': f"FCFE!D{E['eq']}",
         'fcfe_fcff_ps': f"FCFE!D{E['ps_fcff']}", 'fcfe_diff': f"FCFE!D{E['diff']}",
         'named_ranges': NAMED_RANGES,

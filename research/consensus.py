@@ -45,11 +45,17 @@ def load(path):
 
 
 def apply_to_cfg(raw, cons):
-    """用文件一致预期覆盖配置 consensus 段 (依据字段注明文件来源)
+    """用文件一致预期覆盖配置 consensus 段 (依据字段如实溯源, 不做复制填充造假)
 
-    按年份对齐: 槽位 = 配置 model.fcst_years 前 3 个预测年, 只写文件中出现的年份,
-    缺年保留配置原值; 文件年份与预测序列完全无交集则报错 (防位置错位写错槽)。"""
-    src = f"聚源/gildata一致预期文件({cons['source']}{', ' + cons['date'] if cons['date'] else ''})"
+    按年份对齐: 槽位 = 配置 model.fcst_years 前 3 个预测年, 逐槽三种情形:
+      ① 文件覆盖该年 → 写文件值;
+      ② 文件未覆盖但配置有原值 → 保留配置原值 (不用文件值覆盖填充);
+      ③ 文件与配置均无该槽 → 用最近文件年的值平推兜底, 并在 basis 中如实标注;
+    文件年份与预测序列完全无交集则报错 (防位置错位写错槽)。
+    basis 按实际情形拼接, 如:
+      '聚源/gildata一致预期文件(gildata, 2026-08-06, 覆盖2027/2028); 2026沿用原配置'
+      '聚源/gildata一致预期文件(..., 覆盖2027/2028); 2026按2027值平推(文件未覆盖)'"""
+    meta = f"{cons['source']}{', ' + cons['date'] if cons['date'] else ''}"
     node = raw.setdefault('consensus', {})
     fcst = (raw.get('model') or {}).get('fcst_years') or []
     slots = {int(y): i for i, y in enumerate(fcst[:3])}
@@ -66,12 +72,25 @@ def apply_to_cfg(raw, cons):
         if not isinstance(vals, list):
             vals = [vals]
         out = list(vals)
-        for y, v in sorted(hit.items()):
-            i = slots[y]
-            while len(out) <= i:            # 原配置缺槽位: 用末值(无则用本次给定值)顺延占位
-                out.append(out[-1] if out else v)
-            out[i] = v
-        node[key] = {'values': out, 'basis': src}
+        while len(out) < len(slots):
+            out.append(None)                # 先占位, 下面按槽位逐年决定
+        kept, padded = [], []               # 沿用原配置的年 / 平推兜底的(年, 取值来源年)
+        for y, i in sorted(slots.items(), key=lambda kv: kv[1]):
+            if y in hit:                    # ① 文件覆盖 → 写文件值
+                out[i] = hit[y]
+            elif i < len(vals) and vals[i] is not None:
+                kept.append(y)              # ② 文件未覆盖 → 保留配置原值
+            else:                           # ③ 双方均无 → 最近文件年值平推兜底
+                near = min(hit, key=lambda fy: (abs(fy - y), fy))
+                out[i] = hit[near]
+                padded.append((y, near))
+        cov = '/'.join(str(y) for y in sorted(hit))
+        parts = [f'聚源/gildata一致预期文件({meta}, 覆盖{cov})']
+        if kept:
+            parts.append(f"{'/'.join(str(y) for y in kept)}沿用原配置")
+        for y, near in padded:
+            parts.append(f'{y}按{near}值平推(文件未覆盖)')
+        node[key] = {'values': out, 'basis': '; '.join(parts)}
 
     _merge('rev', cons['rev'])
     _merge('np', cons['np'])

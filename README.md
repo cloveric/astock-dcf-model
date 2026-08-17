@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Checks](https://img.shields.io/badge/checks-12%2F12%20passing-brightgreen.svg)](#验证记录)
+[![Checks](https://img.shields.io/badge/checks-11%2F11%20gating%20passing-brightgreen.svg)](#验证记录)
 [![CI](https://github.com/cloveric/astock-dcf-model/actions/workflows/ci.yml/badge.svg)](https://github.com/cloveric/astock-dcf-model/actions)
 
 </div>
@@ -17,7 +17,7 @@
 
 A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利润表预测与资产负债表脱节、配平靠手填轧差、融资结构缺失导致巨额现金与巨额借款并存、WACC 凭经验拍数、预测期硬编码使模型不可复用也不可审计。
 
-本工具将建模纪律固化为工程约束: **配置驱动**(个股差异全部收敛到一个 YAML 文件)、**预测期零硬编码**(3 年历史 + 5 年预测全部公式生成)、**每条假设强制携带依据字段**、**三表严格配平**(差额全期恒为零)、**revolver 融资闭环**(利息循环链在表内迭代展开, 无循环引用)、**WACC 可比公司实算**, 并且生成的每一张工作簿都可以用 LibreOffice headless 重算做机器验收——模型对不对, 不需要肉眼复核, Checks 页 12 项校验给出布尔答案。
+本工具将建模纪律固化为工程约束: **配置驱动**(个股差异全部收敛到一个 YAML 文件)、**预测期零硬编码**(3 年历史 + 5 年预测全部公式生成)、**每条假设强制携带依据字段**、**三表严格配平**(差额全期恒为零)、**revolver 融资闭环**(利息循环链在表内迭代展开, 无循环引用)、**WACC 可比公司实算**, 并且生成的每一张工作簿都可以用 LibreOffice headless 重算做机器验收——模型对不对, 不需要肉眼复核, Checks 页给出布尔答案(11 项门控 + 毛利率信息行)。
 
 与手工坊的对照:
 
@@ -29,7 +29,7 @@ A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利�
 | WACC | 8%/10% 拍脑袋 | 可比 βl unlever 取中位 → 目标结构 relever, 采用值 = IF(override="", 计算值, override) |
 | 预测期 | 敲死数字 | 全部由假设驱动的公式, 改一个假设全簿重算 |
 | 假设依据 | 散落在分析师脑子里 | 每条假设带 basis 字段, 写入 Assumptions 备注列; 可再被 dr 档案 grounding |
-| 验收 | 肉眼 + 经验 | Checks 页 12 项公式校验 + LibreOffice 重算布尔总闸 |
+| 验收 | 肉眼 + 经验 | Checks 页 11 项门控公式校验(另有毛利率信息行) + LibreOffice 重算布尔总闸 |
 | 估值口径 | 单一 DCF | FCFF 与 FCFE 双视图并列, 相对估值 + 三情景 + 敏感性矩阵交叉验证 |
 | 换标的 | 重做一遍 | 换一个 6 位代码 |
 
@@ -51,7 +51,7 @@ A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利�
 构建层   build_model.py  openpyxl 全公式生成 17 张工作表 + 15 个 named ranges + addr.json 地址索引
             │
             ▼
-验收层   verify_model.py  LibreOffice headless 重算 → Checks 12 项校验逐项验收 → 布尔总闸
+验收层   verify_model.py  LibreOffice headless 重算 → Checks 11 项门控校验逐项验收 → 布尔总闸
 ```
 
 三层可独立使用: 手工编写配置可完全绕过数据层(精度最高的用法); 研究层四个开关全部默认关闭, 不传任何研究参数时输出与基础模型逐项一致。
@@ -76,7 +76,7 @@ A 股卖方与买方的 Excel 估值模型长期停留在"手工坊"状态: 利�
 | 14 | Relative_Val | 可比公司 + β unlever/relever + 目标 PE 定价; 研究层激活时附一致预期目标价对照行 |
 | 15 | Sensitivity | WACC×g / 增速×PE / DPO 三张敏感性矩阵(轴为公式自动对中) |
 | 16 | Scenarios | 熊/基/牛三情景估值与汇总对比 |
-| 17 | Checks | 12 项自动校验(含 named range 存在性) + 汇总布尔 |
+| 17 | Checks | 11 项门控校验(含 named range 存在性) + 毛利率信息行 + 汇总布尔 |
 | 18* | DR研究 | `--dr` 激活: 深度研究档案全文存档, 量化结论可追溯 |
 | 19* | 研究摘要 | 研究层激活: 假设项 × 采用值 × 来源 × 置信度对照表 + LLM 备忘录页眉 + 公告要点 |
 
@@ -164,7 +164,7 @@ python verify_model.py --code 00981
 
 口径与局限(使用前必读):
 
-- **币种**: 模型内部一律用财报币种百万(如中芯国际为美元); 港元现价/总市值按配置 `market.fx_hkd`(手工输入, 美元联系汇率区间中枢 7.80)折算, Cover 页注明; PE-TTM 为港元行情口径, 仅供对照;
+- **币种**: 模型内部一律用财报币种百万(如中芯国际为美元); 配置同时提供 `market.price_hkd`(港元原始现价)与 `market.fx_hkd`(港元/财报币种汇率, 美元报告主体 7.80、人民币报告主体约 1.085)时, 构建现算 `price = price_hkd / fx_hkd`——**改 fx_hkd 即生效**; 仅有 `market.price` 时按生成时折算快照使用; PE-TTM 为港元行情口径, 仅供对照;
 - **现金流量表折算**: 东财 HKF10 现金流量表仅人民币口径, 按"期末现金 ÷ BS 现金及等价物"的隐含汇率逐年折算回财报币种(各年依据列注明), 因此 CF 期末现金与 BS 严格勾稽, 但流量项存在期末汇率近似;
 - **IFRS 科目映射**: 无税金及附加/法定盈余公积/一年内到期非流动负债单列, 使用权资产并入物业厂房及设备; 各年"其他"科目为轧差项, 历史严格配平;
 - **单段收入**: 港股无东财"主营构成(按产品)"披露, 兜底为整体单段(增速=总收入 YoY 退坡), 务必按研究拆分修正;
@@ -185,11 +185,11 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 | 段 | 关键字段 | 说明 |
 |---|---|---|
 | `company` | code / code_full / name | 标的标识 |
-| `model` | hist_years / fcst_years / valuation_date / build_date | 年份区间与基准日(3+5 可改) |
-| `market` | price / shares / pe_ttm | 现价、总股本(百万股)、PE-TTM(均带依据) |
+| `model` | hist_years / fcst_years / valuation_date / build_date / mi_share(可选) | 年份区间与基准日(历史 ≥2 年、预测 3–5 年, 超范围构建时报错); `mi_share` 覆盖少数股东损益占比(默认按历史均值自动推导) |
+| `market` | price / shares / pe_ttm; 港股另有 price_hkd / fx_hkd | 现价、总股本(百万股)、PE-TTM(均带依据); 港股同时给出 `price_hkd` 与 `fx_hkd` 时, 构建按 `price_hkd/fx_hkd` 现算财报币种现价(改 fx 即生效) |
 | `consensus` | rev / np(前 3 个预测年) | 一致预期; 可被 `--consensus` 文件覆盖; 无则自动外推占位并注明 |
 | `latest_quarter` | label / rev / np | 最新季报实绩(可选) |
-| `segments` | key / name / driver(`vol_asp` 或 `growth`) / hist_share / hist_gm / vol / asp / gm / logic | 分部业务驱动 |
+| `segments` | key / name / **short(必填, 行标签用简称)** / driver(`vol_asp` 或 `growth`) / hist_share / hist_gm / vol / asp / gm / logic | 分部业务驱动; 无按产品构成披露时 fetch 自动落为单一"整体"分部 |
 | `opex` | sale_rate / adm_rate / rd_rate / tax_rate / oth_op / nonop 等 | 费用率/其他损益/有效税率 |
 | `working_capital` | dso / dio / dpo / pre_rate / staff_rate / taxp_rate | 营运资本天数与比率 |
 | `capex` | capex_rate / trans_rate / dep_rate / dep_new_rate / disp_rate / amort_rate | 资本开支与折旧摊销 |
@@ -197,6 +197,7 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 | `financing` | min_cash_pct / rep_st / rep_cur / rep_lt / rep_lease / rate_* / cash_yield | FIN 页调度输入 |
 | `wacc` | rf / erp / srp / kd / tg / override / wd_basis | WACC 组件; 无可比公司时 `beta_unlevered_input` 兜底 |
 | `scenarios` | bear / base / bull: rev_adj / npm_adj / logic | 情景参数 |
+| `checks` | gm_band(可选, 默认 [0, 0.6]) | 毛利率信息行区间(0.4.0 起该项为信息展示, 不参与 Checks 布尔闸门) |
 | `hist` | is / bs / cf / ppe_split / notes | 历史三表(百万元), `fetch_data.py` 可自动生成 |
 | `relative_val` | target_pe_lo / comps | 可比公司; `beta_l` 为空者不进 βu 中位数 |
 | `sensitivity` | pe_list / np_growth_list / highlight / dpo_deltas | 敏感性矩阵参数 |
@@ -211,7 +212,7 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 - **revolver 配平**: 资金缺口 → revolver 新增借款; 超额现金 sweep 还债 → 溢出购买理财; 货币资金恒等于最低现金, 杜绝"高现金 + 高借款"并存。利息 = 平均余额 × 利率的循环链在 FIN 页表内迭代展开 4 轮(实测残差 ≤ 1e-6), 全簿无循环引用。
 - **WACC 实算**: 可比公司 βl 按各自 D/E 与税率 unlever 取中位, 按目标结构 relever(Hamada); 采用值 = IF(override="", 计算值, override), 全链路可追溯。
 - **三情景**: 熊/基/牛开关贯穿分部增速与毛利率; 基准直接引用主模型输出, 熊/牛用简化净利率法并附桥接说明。
-- **Named ranges 审计轨迹**: WACC 采用值、永续 g、Ke、Kd、rf、ERP、βu、税率、股利支付率、最低现金占比、情景开关、稀释股数、DCF/FCFE 每股共 15 个关键驱动建立命名区域, FCFE 页公式直接引用名称, Checks 第 12 项校验其存在性。
+- **Named ranges 审计轨迹**: WACC 采用值、永续 g、Ke、Kd、rf、ERP、βu、税率、股利支付率、最低现金占比、情景开关、稀释股数、DCF/FCFE 每股共 15 个关键驱动建立命名区域, FCFE 页公式直接引用名称, Checks 末项校验其存在性。
 
 ## 数据口径
 
@@ -228,21 +229,22 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 
 | 标的 | 模式 | 基准 DCF 每股 | FCFE 每股 | BS 配平差额 | FIN 迭代残差 | Checks |
 |---|---|---|---|---|---|---|
-| 胜宏科技 300476 | 完整手工配置 | **340.415208186145 元** | 325.4138 元(−4.4%) | 全期 = 0.00 | ≤ 1.6e-6 | **12/12 TRUE** |
-| 沪电股份 002463 | fetch_data 全自动 | 112.2842 元³ | 107.5540 元(−4.2%) | 全期 = 0.00 | ≤ 4.6e-7 | **12/12 TRUE** |
-| 工业富联 601138 | 兜底(零配置) | 52.4651 元 | 22.3582 元(−57.4%¹) | 全期 = 0.00 | < 0.01 | **12/12 TRUE** |
-| 中芯国际 00981.HK | HKF10 全自动 + 手工修正(偿债滚动/现金储备) | 1.6233 美元⁴ | 0.6769 美元(−58.3%²) | 全期 = 0.00 | ≤ 1.8e-6 | **12/12 TRUE** |
+| 胜宏科技 300476 | 完整手工配置 | **340.415208186145 元** | 325.4508 元(−4.4%) | 全期 = 0.00 | ≤ 1.6e-6 | **11/11 门控 TRUE** |
+| 沪电股份 002463 | fetch_data 全自动 | 112.2842 元³ | 108.3978 元(−3.5%) | 全期 = 0.00 | ≤ 4.6e-7 | **11/11 门控 TRUE** |
+| 工业富联 601138 | 兜底(零配置) | 52.4484 元⁵ | 44.1898 元(−15.7%¹) | 全期 = 0.00 | < 0.01 | **11/11 门控 TRUE** |
+| 中芯国际 00981.HK | HKF10 全自动 + 手工修正(偿债滚动/现金储备) | 1.6233 美元⁴ | 2.1614 美元(+33.1%²) | 全期 = 0.00 | ≤ 1.8e-6 | **11/11 门控 TRUE** |
 
-¹ 兜底还款计划大幅去杠杆, FCFE 含净新增借款流出, 两法机制性拉开; 差异说明见 FCFE 页底部注记。
-² 港股重资产扩产标的: 最低现金按收入 60% 保留为资本开支储备(不参与 sweep), FCFF 经 EV→Equity 桥确认期初净现金而 FCFE 将储备留存表内, 叠加兜底增速退坡, 两法机制性拉开; 模型值低于市价为兜底假设与市场预期的差异, 非公式错误。
-³ 0.3.1 起 EV→Equity 桥扣少数股东权益(002463 末年报 mi=15.4 百万), 较 0.3.0 的 112.2922 元 −0.008 元。
-⁴ 0.3.1 修复 HKF10 分页(2023 年三表补全, CF 币种不再混入人民币)后重生成配置; 少数股东权益(2025 年报 NCI 135.8 亿美元, 中芯系扩产主体少数股东)入桥, DCF 由 0.3.0 的 3.2101 美元修正为 1.6233 美元——口径修正, 非回归。
+¹ 0.4.0 起 FCFE 终值净借款按 `D×g` 对称正常化(不再单边封顶), 去杠杆还款计划不再被 Gordon 永续外推; 601138 两法差由 0.3.1 的 −57.4% 收敛至 −15.7%, 剩余差异见 FCFE 页底部注记。
+² 港股重资产扩产标的: 最低现金按收入 60% 保留为资本开支储备(不参与 sweep); 0.4.0 终值对称正常化后 FCFE 由 0.6769 修正为 2.1614 美元, 高于 FCFF 主要因储备现金留存表内与净现金结构, 两法口径差异为机制性而非公式错误。
+³ EV→Equity 桥扣少数股东权益(002463 末年报 mi=15.4 百万); 0.4.0 起历史归母净利润改用财报披露硬数(002463 历史存在少数股东亏损, 2025A 归母 3818.7→3822.3 百万), DCF 每股在 0.01 元内不变。
+⁴ HKF10 分页修复+少数股东权益入桥的口径说明见 0.3.1 记录; 0.4.0 起利润表分列"合并/归母/少数股东损益", 00981 少数股东损益占比按历史均值 27.67% 自动推导, 2026E 归母净利润由 662.5 修正为 478.3 百万美元, EPS/FCFE/研究摘要同步归母口径(FCFF/EV 桥维持合并口径不变, DCF 每股不变)。
+⁵ 兜底模式行情随取数日刷新, 与 0.3.1 记录的 52.4651 元差异来自现价变动, 非公式回归。
 
-**复现零差异**: 0.3.1 升级(EV桥少数股东权益行/FCFE终值正常化/理财净变动勾稽行)后重跑 300476, 与 0.3.0 成稿逐单元格比对: 除 DCF 页新增"减: 少数股东权益"行、FCFE 页新增"理财净变动/正常化FCFE"行及其余表对 DCF/FCFE 的引用行号联动外, 数值零差异; DCF 每股精确等于 340.415208186145 元(verify_model.py 黄金值断言, 容差 0), FCFE 每股 325.4138 元不变。(0.2.0 升级时既有 16 张表亦与 0.1.0 逐单元格零差异。)
+**复现口径(0.4.0)**: 重跑 300476 与 0.3.1 成稿逐单元格比对: DCF 每股精确复现 **340.415208186145 元**(黄金值断言按配置指纹+容差机制通过); 数值变化仅限两处口径修正——FCFE 终值链(325.4138→325.4508 元)与 DPO 敏感性非中心行(首年改按全额 COGS 重定价); 其余含少数股东损益行在内的新增行对 mi=0 标的数值恒等。(0.2.0/0.3.x 的历史零差异记录见 CHANGELOG。)
 
 **幂等性**: 同一配置连续构建 10 次, 全部单元格(公式 + 输入值)签名完全一致(SHA-256 前缀 `f0b301fd28b8b85d`)。
 
-**研究层验证**: `--dr --consensus --announcements` 全开构建 300476, 产出 19 张工作表, 9 行假设依据被 dr 档案回填, 研究摘要含一致预期/目标价/公告要点对照, LibreOffice 重算 Checks 12/12 TRUE, DCF 每股不变。
+**研究层验证**: `--dr --consensus --announcements` 全开构建 300476, 产出 19 张工作表, 9 行假设依据被 dr 档案回填, 研究摘要含一致预期/目标价/公告要点对照, LibreOffice 重算 Checks 门控全 TRUE, DCF 每股不变。
 
 ## 已知局限
 
@@ -256,7 +258,7 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 
 ## 工程化
 
-- CI(`.github/workflows/ci.yml`)离线可跑: 语法检查 → pytest 离线单测(consensus合并回归/dr打分/web路径校验) → 用仓库内 `configs/300476.yaml` 构建 → `tests/smoke_check.py` 结构冒烟(17 表/15 个 named ranges/Checks 12 项/addr 完整) → 双构建幂等性断言 → 环境有 LibreOffice 时追加全量验收(含 300476 黄金值断言, DCF 每股==340.415208186145, 容差 0);- 贡献准则见 [CONTRIBUTING.md](./CONTRIBUTING.md), 安全披露见 [SECURITY.md](./SECURITY.md), 版本历史见 [CHANGELOG.md](./CHANGELOG.md), AI 协作者说明见 [AGENTS.md](./AGENTS.md)。
+- CI(`.github/workflows/ci.yml`)离线可跑: 语法检查 → pytest 离线单测(consensus合并回归/dr打分/web路径校验) → 用仓库内 `configs/300476.yaml` 构建 → `tests/smoke_check.py` 结构冒烟(17 表/15 个 named ranges/Checks 结构/addr 完整) → 双构建幂等性断言 → 环境有 LibreOffice 时追加全量验收(含 300476 黄金值断言: 配置指纹一致时按容差 max(1e-6,|golden|·1e-9) 复现 340.415208186145);- 贡献准则见 [CONTRIBUTING.md](./CONTRIBUTING.md), 安全披露见 [SECURITY.md](./SECURITY.md), 版本历史见 [CHANGELOG.md](./CHANGELOG.md), AI 协作者说明见 [AGENTS.md](./AGENTS.md)。
 
 ## 免责声明
 

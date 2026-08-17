@@ -22,6 +22,9 @@ market:
   price:
     value: 9.6667
     basis: 2026-08-17腾讯行情港元现价75.4 / fx7.8=9.6667美元
+  price_hkd:
+    value: 75.40026
+    basis: 港元现价(=price 9.6667×fx 7.8回推, 保证price_hkd/fx_hkd与price完全一致; 2026-08-17腾讯行情原始值75.4); build_model按price_hkd/fx_hkd重折算模型价
   shares:
     value: 8561.1
     basis: 总市值6455.0亿港元/港元现价(腾讯行情 2026-08-17); 港股总市值=全部股本×港元价, 与A+H实际口径有差异

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """研究层产出页: DR研究(档案全文存档) / 研究摘要(假设×采用值×来源×置信度)
 由 build_model.py 传入 put/title_bar/sec 样式助手, 避免循环导入。"""
+from openpyxl.styles import PatternFill
 
 DR_SHEET = 'DR研究'
 SUM_SHEET = '研究摘要'
@@ -27,9 +28,10 @@ def build_dr_sheet(wb, dr, put, title_bar, sec, max_rows=400):
     return ws
 
 
-def build_summary_sheet(wb, ctx, table_rows, memo, put, title_bar, sec):
+def build_summary_sheet(wb, ctx, table_rows, memo, put, title_bar, sec, tot_fill=None):
     """研究摘要: 假设项×采用值×来源×置信度 对照表 + LLM备忘录页眉 + 公告要点
-    table_rows: [(假设项, 采用值, 来源, 置信度, 备注)]"""
+    table_rows: [(假设项, 采用值, 来源, 置信度, 备注)]
+    tot_fill: 表头底纹(PatternFill); 默认None时内部创建浅灰底, 兼容现有调用方"""
     ws = wb.create_sheet(SUM_SHEET)
     title_bar(ws, '研究摘要 — 假设 grounding 对照表',
               '假设项 × 采用值 × 来源 × 置信度 | 来源优先级: dr档案 > 聚源/gildata一致预期 > 公告要点 > 配置依据; '
@@ -50,11 +52,12 @@ def build_summary_sheet(wb, ctx, table_rows, memo, put, title_bar, sec):
             r += 1
         r += 1
 
+    if tot_fill is None:                    # 只创建一次, 不再循环内 import+内联构造
+        tot_fill = PatternFill('solid', fgColor='FFF2F2F2')
     hdr = ['假设项', '采用值', '来源', '置信度', '备注']
     for i, h in enumerate(hdr):
         c = put(ws, r, 1 + i, h, 't', bold=True, align='center')
-        from openpyxl.styles import PatternFill
-        c.fill = PatternFill('solid', fgColor='FFF2F2F2')
+        c.fill = tot_fill
     r += 1
     for item, val, src, conf, note in table_rows:
         put(ws, r, 1, item, 't', size=9)

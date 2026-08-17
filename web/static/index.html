@@ -165,11 +165,28 @@ async function delJob(id) {
   refresh();
 }
 
+// 自适应轮询: 有 queued/running 任务时 2 秒, 全部终态 15 秒; 页面隐藏时暂停,
+// 恢复可见立即刷一次; 提交/删除后由各自 handler 直接调 refresh() 立即刷新
+const POLL_FAST = 2000, POLL_SLOW = 15000;
+let pollTimer = null;
+
+function scheduleNext(active) {
+  clearTimeout(pollTimer);
+  if (document.hidden) return;
+  pollTimer = setTimeout(refresh, active ? POLL_FAST : POLL_SLOW);
+}
+
 async function refresh() {
-  let jobs;
-  try { jobs = await api('/api/jobs'); } catch (e) { return; }
+  let active = false;
+  try { active = await refreshOnce(); }
+  catch (e) {}                              // 网络/服务异常: 下一轮慢速重试
+  finally { scheduleNext(active); }
+}
+
+async function refreshOnce() {
+  const jobs = await api('/api/jobs');
   const tb = $('jobs');
-  if (!jobs.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无任务</td></tr>'; return; }
+  if (!jobs.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无任务</td></tr>'; return false; }
   tb.innerHTML = jobs.map(j => {
     let act = '';
     if (j.status === 'done' && j.has_xlsx)
@@ -183,20 +200,24 @@ async function refresh() {
       '<td>' + act + '</td></tr>';
   }).join('');
   // 进行中的任务: 日志尾部随轮询自动刷新展开; 无展开时自动展开首个进行中任务
-  const active = jobs.find(j => j.status === 'running' || j.status === 'queued');
+  const activeJob = jobs.find(j => j.status === 'running' || j.status === 'queued');
   if (detailId) {
     const cur = jobs.find(j => j.id === detailId);
     if (cur && (cur.status === 'running' || cur.status === 'queued')) await renderDetail();
-  } else if (active) {
-    detailId = active.id;
+  } else if (activeJob) {
+    detailId = activeJob.id;
     await renderDetail();
   }
+  return !!activeJob;
 }
 
 $('submit').addEventListener('click', submit);
 $('code').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearTimeout(pollTimer);   // 隐藏即暂停轮询
+  else refresh();                                 // 恢复可见立即刷一次并续排下一轮
+});
 refresh();
-setInterval(refresh, 2000);
 </script>
 </body>
 </html>

@@ -44,6 +44,12 @@ def main():
         for k in ('dcf_ps', 'fcfe_ps', 'checks_bool', 'named_ranges'):
             if k not in addr:
                 fails.append(f'addr.json缺键: {k}')
+        # E6: 已有失败(含缺键)时不再继续索引 addr['dcf_ps'], 直接汇总退出, 防KeyError掩盖真实失败清单
+        if fails:
+            print('SMOKE FAIL:')
+            for f in fails:
+                print(' -', f)
+            sys.exit(1)
         dcf_sheet, dcf_cell = addr['dcf_ps'].split('!')
         v = wb[dcf_sheet][dcf_cell].value
         if not (isinstance(v, str) and v.startswith('=')):

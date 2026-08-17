@@ -22,7 +22,7 @@
   - 费用率/税率/营运资本天数/Capex占比: 取最近年报实际比率, 5年持平(Capex退坡);
   - 股利30%/盈余公积10%/最低现金2%/四档利率(LPR附近)/现金收益1.2%: 通用默认;
   - 计划还款: 一年内到期/长借/租赁各按余额1/5逐年摊还, 短借(revolver)0;
-  - 一致预期: 用最近年报收入×(1+总收入YoY)与净利率外推占位(依据注明"自动推导");
+  - 一致预期: 最近年报收入按YoY×1/.75/.55退坡逐年复利, 净利率持平外推占位(依据注明"自动推导");
   - 可比公司: 兜底默认空清单, WACC的βu转为蓝色输入(默认1.0), 建议手工补 comps。
 """
 import argparse
@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 EM_BASE = 'https://emweb.securities.eastmoney.com/PC_HSF10'
@@ -110,7 +111,12 @@ def fetch_f10_statement(code, kind, years):
     """东财F10三表: kind ∈ lrb/zcfzb/xjllb; 返回 {year: row dict}"""
     url = (f'{EM_BASE}/NewFinanceAnalysis/{kind}AjaxNew?companyType=4'
            f'&reportDateType=0&reportType=1&dates={_dates_param(years)}&code={em_code(code)}')
-    data = json.loads(curl_get(url))['data']
+    payload = json.loads(curl_get(url))
+    data = payload.get('data') if isinstance(payload, dict) else None
+    if not data:
+        # D5: companyType=4为一般工商业模板, 银行/券商/保险等金融类返回data=None
+        raise RuntimeError('东财F10返回空数据(companyType=4 模板不适用,'
+                           '疑似银行/券商/保险等特殊报表模板),暂不支持该类标的')
     out = {}
     for row in data:
         y = int(row['REPORT_DATE'][:4])
@@ -124,7 +130,12 @@ def fetch_f10_statement(code, kind, years):
 def fetch_composition(code):
     """东财F10主营构成: 返回 {year: [按产品分项 dict]}"""
     url = f'{EM_BASE}/BusinessAnalysis/PageAjax?code={em_code(code)}'
-    data = json.loads(curl_get(url))['zygcfx']
+    payload = json.loads(curl_get(url))
+    data = payload.get('zygcfx') if isinstance(payload, dict) else None
+    if data is None:
+        # D5: 金融类等特殊模板无zygcfx节点, 显式报错而非裸TypeError/KeyError
+        raise RuntimeError('东财F10返回空数据(companyType=4 模板不适用,'
+                           '疑似银行/券商/保险等特殊报表模板),暂不支持该类标的')
     out = {}
     for row in data:
         if row['MAINOP_TYPE'] != '2':       # 2=按产品
@@ -139,6 +150,153 @@ def fetch_composition(code):
 
 
 # ============================================================
+# 共享推导/兜底 helper (A股与港股两条路径共用, 消除逐字重复块)
+# ============================================================
+
+def _parallel(jobs, max_workers=5):
+    """并发执行无参job列表, 按原顺序返回结果 (ThreadPoolExecutor包curl_get子进程调用,
+    curl_get签名不变仅编排并发; 兜底整套抓取由串行5次curl变并发)"""
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(j) for j in jobs]
+        return [f.result() for f in futs]
+
+
+def _derive_growth_path(rev_hist):
+    """共享增长路径推导: 最近两年营收→YoY(前一年为0/缺失→默认0.10起步),
+    截断[-15%,35%]后按×1/.75/.55/.40/.30逐年退坡; 返回 (yoy, [5年增速])"""
+    if len(rev_hist) >= 2 and rev_hist[-2]:
+        gy = rev_hist[-1] / rev_hist[-2] - 1
+    else:
+        gy = 0.10
+    g0 = min(max(gy, -0.15), 0.35)
+    return gy, [round(g0 * f, 4) for f in (1.0, 0.75, 0.55, 0.40, 0.30)]
+
+
+def _derive_consensus(rev_hist, np_hist, fcst_years):
+    """共享兜底一致预期 (A4): 增速按YoY×1/.75/.55退坡且逐年复利推营收
+    (rev[i]=rev[i-1]×(1+g_path[i]), 不再全部从rev0单利外推);
+    净利按最近年净利率×对应年营收; 前一年营收0/缺失→gy=0.10, 最近年营收0→npm=0.10.
+    返回 {'rev': {'values': [...], 'basis': ...}, 'np': {'values': [...], 'basis': ...}}"""
+    rev0 = rev_hist[-1] if rev_hist else 0.0
+    np0 = np_hist[-1] if np_hist else 0.0
+    if len(rev_hist) >= 2 and rev_hist[-2]:
+        gy = rev_hist[-1] / rev_hist[-2] - 1
+    else:
+        gy = 0.10
+    factors = (1.0, 0.75, 0.55)
+    n = min(len(factors), len(fcst_years)) if fcst_years else len(factors)
+    cons_rev, prev = [], rev0
+    for f in factors[:n]:
+        prev = prev * (1.0 + gy * f)              # 逐年复利
+        cons_rev.append(round(prev, 1))
+    npm0 = np0 / rev0 if rev0 else 0.10
+    cons_np = [round(rv * npm0, 1) for rv in cons_rev]
+    return {
+        'rev': {'values': cons_rev,
+                'basis': f'自动推导(无一致预期输入): 最近年报收入按YoY{gy:+.1%}×1/.75/.55退坡逐年复利; 建议手工填入gildata/聚源一致预期'},
+        'np': {'values': cons_np,
+               'basis': f'自动推导(无一致预期输入): 逐年复利收入×最近年报净利率{npm0:.1%}; 建议手工填入'},
+    }
+
+
+def _common_defaults(rf, rf_basis):
+    """共享wacc/scenarios/relative_val兜底默认块 (A股与港股仅无风险利率入参不同)"""
+    return {
+        'wacc': {
+            'rf': {'value': rf, 'basis': rf_basis},
+            'erp': {'value': 0.055, 'basis': '通用默认: ERP中枢5.5%; 请按市场口径修正'},
+            'srp': {'value': 0.0, 'basis': '通用默认: 不取个股溢价(避免与β/情景重复计价)'},
+            'kd': {'value': 0.034, 'basis': '通用默认: ≈债务加权平均利率'},
+            'tg': {'value': 0.03, 'basis': '通用默认: 长期名义增速中枢下沿'},
+            'override': None,
+            'beta_unlevered_input': 1.0,
+            'beta_unlevered_basis': '兜底默认: 未配置可比公司, βu=1.0蓝色输入; 建议补relative_val.comps后自动取中位数',
+        },
+        'scenarios': {
+            'bear': {'rev_adj': -0.15, 'npm_adj': -0.03, 'logic': '通用默认: 分部增速-15pct, 净利率-3pct'},
+            'base': {'rev_adj': 0.0, 'npm_adj': 0.0, 'logic': '基准: 不调整'},
+            'bull': {'rev_adj': 0.10, 'npm_adj': 0.015, 'logic': '通用默认: 分部增速+10pct, 净利率+1.5pct'},
+        },
+        'relative_val': {
+            'target_pe_lo': {'value': 25.0, 'basis': '兜底默认: 25x(无可比清单); 建议补comps后取可比中位数为上界'},
+            'comps': [],
+        },
+    }
+
+
+def _fallback_single_segment(hist, years):
+    """D4: 无按产品主营构成披露(或全部无法构成分部)时, 合成整体单分部兜底
+    (字段结构与HK'整体'分部一致: hist_share全1.0, 毛利率=整体历史毛利率, 增速=总营收YoY退坡)"""
+    rev, cost = hist['is']['rev'], hist['is']['cost']
+    gm = []
+    for i in range(len(years)):
+        g = (rev[i] - cost[i]) / rev[i] if rev[i] else 0.30
+        gm.append(round(g, 4))
+    gy, growth = _derive_growth_path(rev)
+    return [{
+        'key': 'main', 'name': '整体业务', 'short': '整体', 'driver': 'growth',
+        'hist_share': [1.0] * len(years), 'hist_gm': gm,
+        'share_basis': '无按产品构成披露, 按整体单分部建模(兜底); 单段=总收入100%',
+        'vol': {'values': growth,
+                'basis': f'自动推导: 最近年报总收入YoY={gy:+.1%}(截断[-15%,35%])逐年退坡×1/.75/.55/.40/.30; 建议按研究修正'},
+        'gm': {'values': [gm[-1]] * 5,
+               'basis': f'自动推导: 最近年报综合毛利率{gm[-1]:.1%}持平; 建议按研究修正'},
+        'logic': '无按产品构成披露, 按整体单分部建模(兜底); 历史毛利率=1-营业成本/营业收入',
+    }]
+
+
+def _market_section(quote, today):
+    """A股market段 (build_fallback_config与apply_fallback共用)"""
+    return {
+        'price': {'value': quote['price'], 'basis': f'{today}腾讯行情(qt.gtimg.cn)'},
+        'shares': {'value': quote['shares_m'],
+                   'basis': f'总市值{quote["mcap_yi"]:.1f}亿/现价(腾讯行情 {today})'},
+        'pe_ttm': quote['pe_ttm'],
+        'pe_ttm_basis': f'腾讯行情PE-TTM({today})',
+    }
+
+
+def _market_section_hk(quote, ccy, today):
+    """港股market段 (A5): 按财报币种映射港元汇率, 保留原始港元现价price_hkd.
+    接口约定: build_model同时见到market.price_hkd与market.fx_hkd时, 应按
+    price = price_hkd / fx_hkd 重折算模型价 (price字段仅为生成时的折算快照)"""
+    ccy = ccy or '未知'
+    fx_map = {'美元': 7.80, '人民币': 1.085, '港元': 1.0}
+    fx_hkd = fx_map.get(ccy, 1.0)
+    if ccy == '美元':
+        fx_basis = '手工输入: 港元/财报币种汇率(美元联系汇率区间7.75-7.85中枢); 请按实际更新'
+    elif ccy == '人民币':
+        fx_basis = '手工输入: 财报币种=人民币, 按HKD/CNY≈1.085折算; 请按实际汇率更新'
+    elif ccy == '港元':
+        fx_basis = '财报币种=港元, 与现价同币种, fx=1.0'
+    else:
+        fx_basis = f'未识别财报币种({ccy}), 暂按fx=1.0处理(待确认); 请按实际汇率更新'
+    price_m = round(quote['price'] / fx_hkd, 4)      # 模型价(财报币种) = 港元价 / fx
+    return {
+        'price': {'value': price_m,
+                  'basis': f'{today}腾讯行情港元现价{quote["price"]} / fx{fx_hkd}={price_m}{ccy}'},
+        'price_hkd': {'value': round(quote['price'], 4),
+                      'basis': f'{today}腾讯行情港元现价(原始口径); build_model按price_hkd/fx_hkd重折算模型价'},
+        'shares': {'value': quote['shares_m'],
+                   'basis': f'总市值{quote["mcap_yi"]:.1f}亿港元/港元现价(腾讯行情 {today}); 港股总市值=全部股本×港元价, 与A+H实际口径有差异'},
+        'pe_ttm': quote['pe_ttm'],
+        'pe_ttm_basis': f'腾讯行情PE-TTM(港元口径, {today})',
+        'fx_hkd': {'value': fx_hkd, 'basis': fx_basis},
+    }
+
+
+def _guess_hk_ccy(raw):
+    """从既有配置文本猜财报币种 (apply_fallback部分补全market时用; 猜不到返回None→按待确认处理).
+    注意判断顺序: 港元现价字样几乎必现于currency_note, 故港元放最后"""
+    comp = raw.get('company') or {}
+    txt = str(comp.get('unit') or '') + str(comp.get('currency_note') or '')
+    for name in ('美元', '人民币', '港元'):
+        if name in txt:
+            return name
+    return None
+
+
+# ============================================================
 # 港股 (5位代码): 东财HKF10(datacenter API, 系统curl) + 腾讯hk行情
 #   - 三表为 IFRS 科目、财报币种(如中芯国际=美元); 现金流量表为人民币口径,
 #     按"CF期末现金/BS现金及等价物"的隐含汇率逐年折算回财报币种(依据注明);
@@ -146,25 +304,36 @@ def fetch_composition(code):
 #   - IFRS 无税金及附加/法定盈余公积等科目 → 置0并在依据注明。
 # ============================================================
 
-def fetch_hk_long_table(rpt, code, item_key):
+def fetch_hk_long_table(rpt, code, item_key, min_year=None):
     """东财HKF10长表 → {year: {科目: 金额}} (仅年报 DATE_TYPE_CODE=001)
-    分页拉全: 单页最多pageSize行, 00981资产负债表实测8页3641行, 只取第1页会丢最早年科目"""
+    分页拉全: 单页最多pageSize行, 00981资产负债表实测8页3641行, 只取第1页会丢最早年科目;
+    D2: 记住第1页声明的pages总数, 后续页返回空/异常直接报错(疑似WAF), 不再静默break截断;
+    min_year: 数据按REPORT_DATE倒序, 某页最旧一行年份<min_year时提前结束(正常早停, 省请求)"""
     out, ccy = {}, None
-    page = 1
+    page, total_pages = 1, None
     while True:
         url = (f'https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName={rpt}'
                f'&columns=ALL&filter=(SECUCODE%3D%22{code}.HK%22)&pageNumber={page}&pageSize=500'
                '&sortTypes=-1&sortColumns=REPORT_DATE&source=HSF10&client=PC')
         res = json.loads(curl_get(url, referer='https://data.eastmoney.com/')).get('result') or {}
         data = res.get('data') or []
+        if total_pages is None:
+            total_pages = res.get('pages') or 1       # 记住第1页声明的总页数
+        elif not data:
+            raise RuntimeError(
+                f'HKF10 {rpt} 分页中断: 第{page}页/共{total_pages}页返回空数据或格式异常, '
+                '疑似东财WAF拦截; 拒绝静默截断(会丢早年科目), 请稍后重试或检查接口')
         for row in data:
             if row.get('DATE_TYPE_CODE') != '001':
                 continue
             y = int(row['REPORT_DATE'][:4])
             out.setdefault(y, {})[row[item_key]] = row['AMOUNT']
             ccy = ccy or row.get('CURRENCY')
-        pages = res.get('pages') or 1
-        if page >= pages or not data:
+        if min_year is not None and data:
+            oldest = int(data[-1]['REPORT_DATE'][:4])
+            if oldest < min_year:
+                break                                 # 早停: 倒序排列下后续页只会更旧
+        if page >= total_pages or not data:
             break
         page += 1
     return out, ccy
@@ -172,15 +341,25 @@ def fetch_hk_long_table(rpt, code, item_key):
 
 def build_hist_hk(code, years):
     """东财HKF10三表 → 模型 hist 结构 (单位: 财报币种百万, IFRS科目映射)"""
-    inc, ccy = fetch_hk_long_table('RPT_HKF10_FN_INCOME', code, 'ITEM_NAME')
-    bal, _ = fetch_hk_long_table('RPT_HKF10_FN_BALANCE', code, 'ITEM_NAME')
-    cfs, _ = fetch_hk_long_table('RPT_HKF10_FN_CASHFLOW_PC', code, 'STD_ITEM_NAME')
+    min_y = min(years)
+    inc, ccy = fetch_hk_long_table('RPT_HKF10_FN_INCOME', code, 'ITEM_NAME', min_year=min_y)
+    bal, _ = fetch_hk_long_table('RPT_HKF10_FN_BALANCE', code, 'ITEM_NAME', min_year=min_y)
+    cfs, _ = fetch_hk_long_table('RPT_HKF10_FN_CASHFLOW_PC', code, 'STD_ITEM_NAME',
+                                 min_year=min_y)
     missing = [y for y in years if y not in inc or y not in bal or y not in cfs]
     if missing:
         raise RuntimeError(f'HKF10 缺少年报: {missing}')
-
-    def m(v, nd=1):
-        return 0.0 if v is None else round(v / 1e6, nd)
+    # D2b 核心科目守卫: 每个请求年份必须存在以下科目; li()/bi()的缺失回退0仅限次要科目
+    core_req = (('利润表', inc, ('营业额',)),
+                ('资产负债表', bal, ('股东权益', '流动资产合计')),
+                ('现金流量表', cfs, ('期末现金',)))
+    for stmt, table, keys in core_req:
+        for y in years:
+            miss = [k for k in keys if table[y].get(k) is None]
+            if miss:
+                raise RuntimeError(
+                    f'HKF10 {stmt} {y}年报核心科目缺失: {miss}; 科目缺失, '
+                    '疑似金融类报表模板或接口科目变更, 拒绝按0建模')
 
     is_d = {k: [] for k in ('rev', 'cost', 'taxadd', 'sale', 'adm', 'rd', 'fin',
                             'othop', 'nonop', 'taxexp', 'np_p')}
@@ -202,14 +381,14 @@ def build_hist_hk(code, years):
         sale, adm, rd = li('销售及分销费用'), li('行政开支'), li('研发费用')
         fin = li('融资成本') - li('利息收入')          # 净融资成本 (IFRS口径)
         op, tp = li('经营溢利'), li('除税前溢利')
-        is_d['rev'].append(m(rev)); is_d['cost'].append(m(cost))
+        is_d['rev'].append(_m(rev)); is_d['cost'].append(_m(cost))
         is_d['taxadd'].append(0.0)                    # IFRS无"税金及附加"科目
-        is_d['sale'].append(m(sale)); is_d['adm'].append(m(adm)); is_d['rd'].append(m(rd))
-        is_d['fin'].append(m(fin))
-        is_d['othop'].append(m(op - (rev - cost - sale - adm - rd - fin)))   # 轧差(含其他收入/应占联营)
-        is_d['nonop'].append(m(tp - op))
-        is_d['taxexp'].append(m(li('税项')))
-        is_d['np_p'].append(m(li('股东应占溢利')))
+        is_d['sale'].append(_m(sale)); is_d['adm'].append(_m(adm)); is_d['rd'].append(_m(rd))
+        is_d['fin'].append(_m(fin))
+        is_d['othop'].append(_m(op - (rev - cost - sale - adm - rd - fin)))  # 轧差(含其他收入/应占联营)
+        is_d['nonop'].append(_m(tp - op))
+        is_d['taxexp'].append(_m(li('税项')))
+        is_d['np_p'].append(_m(li('股东应占溢利')))
 
         cash_raw = B.get('现金及等价物')
         if not cash_raw:
@@ -232,50 +411,71 @@ def build_hist_hk(code, years):
         sc, cr, oci = bi('股本'), bi('股本溢价'), bi('其他储备')
         re_ = bi('保留溢利(累计亏损)')
         tpe = bi('股东权益')
-        bs_d['cash'].append(m(cash)); bs_d['tfa'].append(m(tfa))
-        bs_d['ar'].append(m(ar)); bs_d['pre'].append(m(pre)); bs_d['orec'].append(0.0)
-        bs_d['inv'].append(m(inv))
-        bs_d['oca'].append(m(tca - cash - tfa - ar - pre - inv))     # 轧差
-        bs_d['ppe'].append(m(ppe)); bs_d['rou'].append(0.0)          # IFRS使用权资产未单列
-        bs_d['ia'].append(m(ia)); bs_d['gw'].append(0.0); bs_d['lpe'].append(0.0)
-        bs_d['dta'].append(m(dta)); bs_d['oei'].append(m(oei))
-        bs_d['onca'].append(m(tnca - ppe - ia - dta - oei))          # 轧差(含联营公司权益)
-        bs_d['stl'].append(m(stl)); bs_d['ap'].append(m(ap))
-        bs_d['contract'].append(m(contract)); bs_d['staff'].append(0.0)
-        bs_d['taxp'].append(m(taxp)); bs_d['opay'].append(0.0)
-        bs_d['cur1y'].append(m(cur1y))
-        bs_d['ocl'].append(m(tcl - stl - ap - contract - taxp - cur1y))   # 轧差
-        bs_d['ltl'].append(m(ltl)); bs_d['lease'].append(m(lease))
-        bs_d['oncl'].append(m(tncl - ltl - lease))                   # 轧差(含递延收入/递延税项负债)
-        bs_d['sc'].append(m(sc)); bs_d['cr'].append(m(cr)); bs_d['ts'].append(0.0)
-        bs_d['oci'].append(m(oci)); bs_d['sr'].append(0.0)           # IFRS无法定盈余公积
-        bs_d['re'].append(m(re_))
-        bs_d['oeq'].append(m(tpe - sc - cr - oci - re_))             # 轧差
-        bs_d['mi'].append(m(bi('少数股东权益')))
+        bs_d['cash'].append(_m(cash)); bs_d['tfa'].append(_m(tfa))
+        bs_d['ar'].append(_m(ar)); bs_d['pre'].append(_m(pre)); bs_d['orec'].append(0.0)
+        bs_d['inv'].append(_m(inv))
+        bs_d['oca'].append(_m(tca - cash - tfa - ar - pre - inv))    # 轧差
+        bs_d['ppe'].append(_m(ppe)); bs_d['rou'].append(0.0)         # IFRS使用权资产未单列
+        bs_d['ia'].append(_m(ia)); bs_d['gw'].append(0.0); bs_d['lpe'].append(0.0)
+        bs_d['dta'].append(_m(dta)); bs_d['oei'].append(_m(oei))
+        bs_d['onca'].append(_m(tnca - ppe - ia - dta - oei))         # 轧差(含联营公司权益)
+        bs_d['stl'].append(_m(stl)); bs_d['ap'].append(_m(ap))
+        bs_d['contract'].append(_m(contract)); bs_d['staff'].append(0.0)
+        bs_d['taxp'].append(_m(taxp)); bs_d['opay'].append(0.0)
+        bs_d['cur1y'].append(_m(cur1y))
+        bs_d['ocl'].append(_m(tcl - stl - ap - contract - taxp - cur1y))  # 轧差
+        bs_d['ltl'].append(_m(ltl)); bs_d['lease'].append(_m(lease))
+        bs_d['oncl'].append(_m(tncl - ltl - lease))                  # 轧差(含递延收入/递延税项负债)
+        bs_d['sc'].append(_m(sc)); bs_d['cr'].append(_m(cr)); bs_d['ts'].append(0.0)
+        bs_d['oci'].append(_m(oci)); bs_d['sr'].append(0.0)          # IFRS无法定盈余公积
+        bs_d['re'].append(_m(re_))
+        bs_d['oeq'].append(_m(tpe - sc - cr - oci - re_))            # 轧差
+        bs_d['mi'].append(_m(bi('少数股东权益')))
 
         C = cfs[y]
-        # 现金流表为人民币口径 → 按隐含汇率(期末现金/BS现金)折算回财报币种
+        # 现金流表为人民币口径 → 按隐含汇率(CF期末现金/BS现金)折算回财报币种;
+        # D1: 按CURRENCY分币种校验隐含比率区间, 不再只认fx≈1与[3,12](此前港元主体≈0.92被误拒)
         fx = (C.get('期末现金') or 0.0) / cash
-        if abs(fx - 1.0) < 0.05:
-            fx = 1.0                              # 财报币种≈人民币, 不折算
-        elif not (3.0 <= fx <= 12.0):
-            raise RuntimeError(
-                f'HKF10 {y}年隐含汇率异常: CF期末现金/BS现金={fx:.4f} 落在[3,12]外 '
-                '(财报币种非人民币时合理区间约6-9), 拒绝静默回退fx=1.0导致该年CF混入人民币口径; '
-                '请检查接口数据或手工配置hist')
+        ccy_name = ccy or '美元'
+        if ccy_name == '人民币':
+            if 0.95 < fx < 1.05:
+                fx = 1.0                          # 人民币主体: snap到1, 不折算
+            else:
+                raise RuntimeError(
+                    f'HKF10 {y}年隐含汇率异常: 检测币种=人民币, CF期末现金/BS现金={fx:.4f} '
+                    '落在(0.95,1.05)外(人民币主体应≈1), 拒绝静默回退导致该年CF口径错乱; '
+                    '请检查接口数据或手工配置hist')
+        elif ccy_name == '港元':
+            if not (0.80 < fx < 1.00):            # RMB/HKD≈0.92, 按实测比率折算
+                raise RuntimeError(
+                    f'HKF10 {y}年隐含汇率异常: 检测币种=港元, CF期末现金/BS现金={fx:.4f} '
+                    '落在(0.80,1.00)外(港元主体RMB/HKD应≈0.92), 拒绝静默回退; '
+                    '请检查接口数据或手工配置hist')
+        elif ccy_name == '美元':
+            if not (6.0 < fx < 9.0):
+                raise RuntimeError(
+                    f'HKF10 {y}年隐含汇率异常: 检测币种=美元, CF期末现金/BS现金={fx:.4f} '
+                    '落在(6.0,9.0)外(美元主体RMB/USD应≈6-9), '
+                    '拒绝静默回退fx=1.0导致该年CF混入人民币口径; 请检查接口数据或手工配置hist')
+        else:
+            if not (0.5 < fx < 12.0):
+                raise RuntimeError(
+                    f'HKF10 {y}年隐含汇率异常: 检测币种={ccy_name}(非人民币/港元/美元的其他币种, '
+                    f'仅做宽松校验), CF期末现金/BS现金={fx:.4f} 落在(0.5,12)兜底区间外, '
+                    '拒绝静默回退; 请检查接口数据或手工配置hist')
 
         def ci(k):
             return (C.get(k) or 0.0) / fx
 
         cf_d['np'].append(is_d['np_p'][-1])
-        cf_d['da'].append(m(ci('加:折旧及摊销')))
-        cf_d['ocf'].append(m(ci('经营业务现金净额')))
-        cf_d['capex'].append(m(-(ci('购建固定资产') + ci('购建无形资产及其他资产'))))
-        cf_d['icf'].append(m(ci('投资业务现金净额')))
-        cf_d['fcf'].append(m(ci('融资业务现金净额')))
-        cf_d['cash1'].append(m(ci('期末现金')))       # = BS现金及等价物 (隐含汇率口径)
+        cf_d['da'].append(_m(ci('加:折旧及摊销')))
+        cf_d['ocf'].append(_m(ci('经营业务现金净额')))
+        cf_d['capex'].append(_m(-(ci('购建固定资产') + ci('购建无形资产及其他资产'))))
+        cf_d['icf'].append(_m(ci('投资业务现金净额')))
+        cf_d['fcf'].append(_m(ci('融资业务现金净额')))
+        cf_d['cash1'].append(_m(ci('期末现金')))      # = BS现金及等价物 (隐含汇率口径)
     y0 = sorted(years)[-1]
-    ppe_split = {'fa_net': m(bal[y0].get('物业厂房及设备')),
+    ppe_split = {'fa_net': _m(bal[y0].get('物业厂房及设备')),
                  'cip': 0.0}                            # HKF10未拆分在建工程
     return {'is': is_d, 'bs': bs_d, 'cf': cf_d, 'ppe_split': ppe_split,
             'currency': ccy or '美元', 'cf_fx_note': '现金流量表(人民币口径)按隐含汇率折算'}
@@ -288,9 +488,7 @@ def build_segments_hk(hist, years):
     for i, y in enumerate(sorted(years)):
         g = (rev[i] - hist['is']['cost'][i]) / rev[i] if rev[i] else 0.30
         gm.append(round(g, 4))
-    gy = rev[-1] / rev[-2] - 1 if len(rev) >= 2 and rev[-2] else 0.10
-    g0 = min(max(gy, -0.15), 0.35)
-    growth = [round(g0 * f, 4) for f in (1.0, 0.75, 0.55, 0.40, 0.30)]
+    gy, growth = _derive_growth_path(rev)        # 共享增长路径推导(含rev[-2]==0守卫)
     return [{
         'key': 'seg1', 'name': '整体业务(单段简化)', 'short': '整体', 'driver': 'growth',
         'hist_share': [1.0] * len(years), 'hist_gm': gm,
@@ -316,57 +514,21 @@ def build_fallback_config_hk(code):
     ass = derive_assumptions(hist, fcst)
     ass['dividend']['surplus_rate'] = {'value': 0.0,
                                        'basis': 'IFRS无法定盈余公积科目, 计提率置0'}
-    fx_hkd = 7.80 if ccy == '美元' else 1.0
-    price_m = round(quote['price'] / fx_hkd, 4)       # 模型价(财报币种) = 港元价 / fx
-    rev0, np0 = hist['is']['rev'][-1], hist['is']['np_p'][-1]
-    gy = rev0 / hist['is']['rev'][-2] - 1 if len(hist['is']['rev']) >= 2 else 0.1
-    g_path = [gy * f for f in (1.0, 0.75, 0.55)]
-    cons_rev = [round(rev0 * (1 + gp), 1) for gp in g_path]
-    npm0 = np0 / rev0 if rev0 else 0.1
-    cons_np = [round(rv * npm0, 1) for rv in cons_rev]
+    common = _common_defaults(0.04, '通用默认(港股): 10年期美债收益率约4%(财报币种口径)')
     cfg = {
         'company': {'code': code, 'code_full': f'{code}.HK', 'name': quote['name'],
                     'currency_note': f'{ccy}(财报口径) / 百万元 (每股数据为{ccy}; 港元现价按fx折算)',
                     'unit': f'{ccy}百万元(财报口径)'},
         'model': {'hist_years': years, 'fcst_years': fcst,
                   'valuation_date': today, 'build_date': today},
-        'market': {
-            'price': {'value': price_m,
-                      'basis': f'{today}腾讯行情港元现价{quote["price"]} / fx{fx_hkd}={price_m}{ccy}'},
-            'shares': {'value': quote['shares_m'],
-                       'basis': f'总市值{quote["mcap_yi"]:.1f}亿港元/港元现价(腾讯行情 {today}); 港股总市值=全部股本×港元价, 与A+H实际口径有差异'},
-            'pe_ttm': quote['pe_ttm'],
-            'pe_ttm_basis': f'腾讯行情PE-TTM(港元口径, {today})',
-            'fx_hkd': {'value': fx_hkd,
-                       'basis': ('手工输入: 港元/财报币种汇率(美元联系汇率区间7.75-7.85中枢); 请按实际更新'
-                                 if ccy == '美元' else '财报币种=人民币, 与港元接近1:1折算, 请按实际更新')},
-        },
-        'consensus': {
-            'rev': {'values': cons_rev, 'basis': f'自动推导(无一致预期输入): 最近年报收入×(1+YoY{gy:+.1%})退坡; 建议手工填入'},
-            'np': {'values': cons_np, 'basis': f'自动推导(无一致预期输入): 收入×最近年报净利率{npm0:.1%}; 建议手工填入'},
-        },
+        'market': _market_section_hk(quote, ccy, today),   # A5: 分币种fx映射+price_hkd
+        'consensus': _derive_consensus(hist['is']['rev'], hist['is']['np_p'], fcst),
         'segments': segs,
         **ass,
-        'wacc': {
-            'rf': {'value': 0.04, 'basis': '通用默认(港股): 10年期美债收益率约4%(财报币种口径)'},
-            'erp': {'value': 0.055, 'basis': '通用默认: ERP中枢5.5%; 港股口径请按研究修正'},
-            'srp': {'value': 0.0, 'basis': '通用默认: 不取个股溢价(避免与β/情景重复计价)'},
-            'kd': {'value': 0.034, 'basis': '通用默认: ≈债务加权平均利率'},
-            'tg': {'value': 0.03, 'basis': '通用默认: 长期名义增速中枢下沿'},
-            'override': None,
-            'beta_unlevered_input': 1.0,
-            'beta_unlevered_basis': '兜底默认: 未配置可比公司, βu=1.0蓝色输入; 建议补relative_val.comps后自动取中位数',
-        },
-        'scenarios': {
-            'bear': {'rev_adj': -0.15, 'npm_adj': -0.03, 'logic': '通用默认: 分部增速-15pct, 净利率-3pct'},
-            'base': {'rev_adj': 0.0, 'npm_adj': 0.0, 'logic': '基准: 不调整'},
-            'bull': {'rev_adj': 0.10, 'npm_adj': 0.015, 'logic': '通用默认: 分部增速+10pct, 净利率+1.5pct'},
-        },
+        'wacc': common['wacc'],
+        'scenarios': common['scenarios'],
         'hist': {k: v for k, v in hist.items() if k in ('is', 'bs', 'cf', 'ppe_split')},
-        'relative_val': {
-            'target_pe_lo': {'value': 25.0, 'basis': '兜底默认: 25x(无可比清单); 建议补comps后取可比中位数为上界'},
-            'comps': [],
-        },
+        'relative_val': common['relative_val'],
         'cover': {'subtitle': f'{quote["name"]} | 港股自动兜底建模(东财HKF10+腾讯行情; 财报币种{ccy})'},
     }
     return cfg
@@ -384,11 +546,15 @@ def _g(row, key):
     return v if isinstance(v, (int, float)) else None
 
 
-def build_hist(code, years):
-    """拉取并映射三表为模型 hist 结构 (单位: 百万)"""
-    lrb = fetch_f10_statement(code, 'lrb', years)
-    zcfzb = fetch_f10_statement(code, 'zcfzb', years)
-    xjllb = fetch_f10_statement(code, 'xjllb', years)
+def build_hist(code, years, tables=None):
+    """拉取并映射三表为模型 hist 结构 (单位: 百万)
+    tables: 可选预取的(lrb, zcfzb, xjllb)三元组 (供并发抓取后复用, 避免重复请求)"""
+    if tables is None:
+        lrb = fetch_f10_statement(code, 'lrb', years)
+        zcfzb = fetch_f10_statement(code, 'zcfzb', years)
+        xjllb = fetch_f10_statement(code, 'xjllb', years)
+    else:
+        lrb, zcfzb, xjllb = tables
     is_d = {k: [] for k in ('rev', 'cost', 'taxadd', 'sale', 'adm', 'rd', 'fin',
                             'othop', 'nonop', 'taxexp', 'np_p')}
     bs_d = {k: [] for k in ('cash', 'tfa', 'ar', 'pre', 'orec', 'inv', 'oca', 'ppe', 'rou',
@@ -484,11 +650,28 @@ def build_hist(code, years):
 
 def build_segments(comp, years):
     """主营构成 → 分段配置 (兜底): 最近年报前3项(按RANK), 其余并'其他';
-    跨年按RANK对齐(扛名称变更), '其中:'子项先行剔除防重复计数"""
+    跨年按RANK对齐(扛名称变更), '其中:'子项先行剔除防重复计数;
+    D3: 某历史年缺构成时回退最近一个有构成年份的份额结构(不再记0),
+    最新历史年份额合计仍为0时显式报错"""
     comp = {y: [it for it in items if not it['ITEM_NAME'].startswith('其中')]
             for y, items in comp.items()}
-    y0 = max(y for y in comp if y <= max(years))
+    avail = sorted(y for y in comp if comp[y])
+    if not avail:
+        return []          # 全部无法构成分部 → 由调用方走整体单分部兜底(D4)
+    cand = [y for y in avail if y <= max(years)]
+    y0 = max(cand) if cand else max(avail)
     items = comp[y0]
+    # 各历史年实际使用的构成年份: 缺失年回退最近一个有构成的年份(优先更早的相邻年)
+    year_src = {}
+    for y in sorted(years):
+        if comp.get(y):
+            year_src[y] = y
+        else:
+            earlier = [ay for ay in avail if ay < y]
+            year_src[y] = earlier[-1] if earlier else min(ay for ay in avail if ay > y)
+    y_last = sorted(years)[-1]
+    fb_note = (f'; {y_last}年报构成缺失, 份额回退{year_src[y_last]}年报结构'
+               if year_src[y_last] != y_last else '')
     top = items[:3]
     names = [it['ITEM_NAME'] for it in top]
     has_rest = len(items) > 3
@@ -499,7 +682,7 @@ def build_segments(comp, years):
     for gi, (rank_idx, gname) in enumerate(groups):
         share, gm = [], []
         for y in sorted(years):
-            yitems = comp.get(y) or []
+            yitems = comp.get(year_src[y]) or []
             ytot = sum((_g(it, 'MAIN_BUSINESS_INCOME') or 0.0) for it in yitems)
             if rank_idx is None:
                 topval = sum((_g(it, 'MAIN_BUSINESS_INCOME') or 0.0) for it in yitems[:3])
@@ -511,32 +694,35 @@ def build_segments(comp, years):
                 sgm = _g(it, 'GROSS_RPOFIT_RATIO') if it else None
             share.append(round((sinc or 0.0) / ytot, 4) if ytot else 0.0)
             gm.append(round(sgm, 4) if sgm is not None else 0.30)
-        # 最近一年分部YoY (RANK对齐)
+        # 最近一年分部YoY (RANK对齐; 上年构成缺失时经_derive_growth_path回退默认0.10起步)
         total_inc = sum((_g(it, 'MAIN_BUSINESS_INCOME') or 0.0) for it in items)
+        cur = share[-1] * total_inc
         if len(years) >= 2:
             yprev = comp.get(sorted(years)[-2]) or []
             ytot_p = sum((_g(it, 'MAIN_BUSINESS_INCOME') or 0.0) for it in yprev)
             if rank_idx is None:
                 p = max(ytot_p - sum((_g(it, 'MAIN_BUSINESS_INCOME') or 0.0) for it in yprev[:3]), 0.0)
             else:
-                p = _g(yprev[rank_idx], 'MAIN_BUSINESS_INCOME') if len(yprev) > rank_idx else 0.0
-            cur = share[-1] * total_inc
-            yoy = (cur / p - 1) if p else 0.10
+                p = (_g(yprev[rank_idx], 'MAIN_BUSINESS_INCOME') or 0.0) if len(yprev) > rank_idx else 0.0
+            yoy, growth = _derive_growth_path([p, cur])   # 共享增长路径(含前值0守卫)
         else:
-            yoy = 0.10
-        g0 = min(max(yoy, -0.15), 0.35)
-        growth = [round(g0 * f, 4) for f in (1.0, 0.75, 0.55, 0.40, 0.30)]
+            yoy, growth = _derive_growth_path([cur])
         key = f'seg{gi + 1}' if rank_idx is not None else 'oth'
         segs.append({
             'key': key, 'name': gname, 'short': gname, 'driver': 'growth',
             'hist_share': share, 'hist_gm': gm,
-            'share_basis': f'占比: 东财F10主营构成(按产品, {y0}年报)',
+            'share_basis': f'占比: 东财F10主营构成(按产品, {y0}年报)' + fb_note,
             'vol': {'values': growth,
                     'basis': f'自动推导: 最近年报分部收入YoY={yoy:+.1%}(截断[-15%,35%])逐年退坡×1/.75/.55/.40/.30; 建议按研究修正'},
             'gm': {'values': [gm[-1]] * 5,
                    'basis': f'自动推导: {y0}年报分部毛利率{gm[-1]:.1%}持平; 建议按研究修正'},
             'logic': f'兜底自动分段(东财F10主营构成按产品); {y0}年报收入占比{share[-1]:.1%}',
         })
+    if not any(s['hist_share'][-1] for s in segs):
+        raise RuntimeError(
+            f'东财F10主营构成缺最新历史年({y_last})数据: 各分部最新年份额合计为0 '
+            '(回退最近有构成年份后仍为0, 构成收入缺失或全为0), 拒绝按0份额建模; '
+            '请手工配置segments或修正构成数据')
     return segs
 
 
@@ -619,70 +805,121 @@ def build_fallback_config(code):
     code = str(code)
     if is_hk(code):
         return build_fallback_config_hk(code)
-    quote = fetch_quote(code)
     today = datetime.date.today().isoformat()
     years = default_hist_years()
-    hist = build_hist(code, years)
-    comp = fetch_composition(code)
+    # 效率: 行情+三表+主营构成共5个curl并发抓取
+    quote, lrb, zcfzb, xjllb, comp = _parallel([
+        lambda: fetch_quote(code),
+        lambda: fetch_f10_statement(code, 'lrb', years),
+        lambda: fetch_f10_statement(code, 'zcfzb', years),
+        lambda: fetch_f10_statement(code, 'xjllb', years),
+        lambda: fetch_composition(code),
+    ])
+    hist = build_hist(code, years, tables=(lrb, zcfzb, xjllb))
     segs = build_segments(comp, years) if comp else []
+    if not segs:
+        segs = _fallback_single_segment(hist, years)   # D4: 无按产品构成 → 整体单分部
     fcst = list(range(years[-1] + 1, years[-1] + 6))
     ass = derive_assumptions(hist, fcst)
-    rev0, np0 = hist['is']['rev'][-1], hist['is']['np_p'][-1]
-    gy = rev0 / hist['is']['rev'][-2] - 1 if len(hist['is']['rev']) >= 2 else 0.1
-    g_path = [gy * f for f in (1.0, 0.75, 0.55)]
-    cons_rev = [round(rev0 * (1 + gp), 1) for gp in g_path]
-    npm0 = np0 / rev0 if rev0 else 0.1
-    cons_np = [round(rv * npm0, 1) for rv in cons_rev]
+    common = _common_defaults(0.02, '通用默认: 10年期国债收益率约2.0%')
     cfg = {
         'company': {'code': code, 'code_full': f'{code}.{em_code(code)[:2]}',
                     'name': quote['name'], 'currency_note': '人民币 / 百万元 (每股数据为元)'},
         'model': {'hist_years': years, 'fcst_years': fcst,
                   'valuation_date': today, 'build_date': today},
-        'market': {
-            'price': {'value': quote['price'], 'basis': f'{today}腾讯行情(qt.gtimg.cn)'},
-            'shares': {'value': quote['shares_m'], 'basis': f'总市值{quote["mcap_yi"]:.1f}亿/现价(腾讯行情 {today})'},
-            'pe_ttm': quote['pe_ttm'],
-            'pe_ttm_basis': f'腾讯行情PE-TTM({today})',
-        },
-        'consensus': {
-            'rev': {'values': cons_rev, 'basis': f'自动推导(无一致预期输入): 最近年报收入×(1+YoY{gy:+.1%})退坡; 建议手工填入gildata/聚源一致预期'},
-            'np': {'values': cons_np, 'basis': f'自动推导(无一致预期输入): 收入×最近年报净利率{npm0:.1%}; 建议手工填入'},
-        },
+        'market': _market_section(quote, today),
+        'consensus': _derive_consensus(hist['is']['rev'], hist['is']['np_p'], fcst),
         'segments': segs,
         **ass,
-        'wacc': {
-            'rf': {'value': 0.02, 'basis': '通用默认: 10年期国债收益率约2.0%'},
-            'erp': {'value': 0.055, 'basis': '通用默认: A股ERP中枢5.5%'},
-            'srp': {'value': 0.0, 'basis': '通用默认: 不取个股溢价(避免与β/情景重复计价)'},
-            'kd': {'value': 0.034, 'basis': '通用默认: ≈四档债务加权平均利率'},
-            'tg': {'value': 0.03, 'basis': '通用默认: 长期名义增速中枢下沿'},
-            'override': None,
-            'beta_unlevered_input': 1.0,
-            'beta_unlevered_basis': '兜底默认: 未配置可比公司, βu=1.0蓝色输入; 建议补relative_val.comps后自动取中位数',
-        },
-        'scenarios': {
-            'bear': {'rev_adj': -0.15, 'npm_adj': -0.03, 'logic': '通用默认: 分部增速-15pct, 净利率-3pct'},
-            'base': {'rev_adj': 0.0, 'npm_adj': 0.0, 'logic': '基准: 不调整'},
-            'bull': {'rev_adj': 0.10, 'npm_adj': 0.015, 'logic': '通用默认: 分部增速+10pct, 净利率+1.5pct'},
-        },
+        'wacc': common['wacc'],
+        'scenarios': common['scenarios'],
         'hist': hist,
-        'relative_val': {
-            'target_pe_lo': {'value': 25.0, 'basis': '兜底默认: 25x(无可比清单); 建议补comps后取可比中位数为上界'},
-            'comps': [],
-        },
+        'relative_val': common['relative_val'],
         'cover': {'subtitle': f'{quote["name"]} | 自动兜底建模(东财F10+腾讯行情)'},
     }
     return cfg
 
 
 def apply_fallback(raw, code):
-    """就地补全缺失配置的兜底入口 (供build_model.py调用)"""
-    auto = build_fallback_config(code)
-    for k, v in auto.items():
-        raw.setdefault(k, v)
-    raw.setdefault('hist', auto['hist'])
-    if not raw.get('segments'):
-        raw['segments'] = auto['segments']
+    """就地补全缺失配置的兜底入口 (供build_model.py调用)
+    效率修复: 先检查缺什么再按需抓取, 不再无条件整套重拉 —
+      - raw已完整(如刚由build_fallback_config生成) → 直接返回, 零网络请求;
+      - hist/segments/market全缺(近似空配置) → 整套兜底一次(内部并发抓取);
+      - 部分缺失 → 只抓对应数据源: 只缺segments仅拉主营构成, 只缺hist仅拉三表,
+        缺market/company/cover才拉行情; 其余假设段由hist本地推导, 不发请求"""
+    code = str(code)
+    need_hist = not raw.get('hist')
+    need_segs = not raw.get('segments')
+    need_market = not raw.get('market')
+    derived_keys = ('company', 'model', 'consensus', 'opex', 'working_capital', 'capex',
+                    'dividend', 'financing', 'wacc', 'scenarios', 'relative_val', 'cover')
+    need_derived = [k for k in derived_keys if k not in raw]
+    if not (need_hist or need_segs or need_market or need_derived):
+        return          # 配置完整 → 跳过 (修复build_fallback_config刚跑完又被整套重抓)
+    if need_hist and need_segs and need_market:
+        auto = build_fallback_config(code)             # 近似空配置 → 整套兜底一次
+        for k, v in auto.items():
+            raw.setdefault(k, v)
+        if not raw.get('segments'):
+            raw['segments'] = auto['segments']
+        return
+    hk = is_hk(code)
+    today = datetime.date.today().isoformat()
+    years = list((raw.get('model') or {}).get('hist_years') or default_hist_years())
+    fcst = list((raw.get('model') or {}).get('fcst_years') or
+                range(max(years) + 1, max(years) + 6))
+    hist, hist_ccy = raw.get('hist'), None
+    if need_hist:                                      # 只缺hist → 仅抓三表
+        if hk:
+            full = build_hist_hk(code, years)
+            hist_ccy = full.get('currency')
+            hist = {k: v for k, v in full.items() if k in ('is', 'bs', 'cf', 'ppe_split')}
+        else:
+            hist = build_hist(code, years)
+        raw['hist'] = hist
+    if need_segs:                                      # 只缺segments → 仅拉主营构成
+        if hk:
+            raw['segments'] = build_segments_hk(hist, years)   # 由hist推导, 无额外请求
+        else:
+            comp = fetch_composition(code)
+            segs = build_segments(comp, years) if comp else []
+            raw['segments'] = segs or _fallback_single_segment(hist, years)
+    quote = None
+    if need_market or 'company' in need_derived or 'cover' in need_derived:
+        quote = fetch_quote(code)                      # 缺market/company/cover才抓行情
+    if need_market:
+        raw['market'] = (_market_section_hk(quote, hist_ccy or _guess_hk_ccy(raw), today)
+                         if hk else _market_section(quote, today))
+    if need_derived:                                   # 其余假设段由hist本地推导
+        ass = derive_assumptions(hist, fcst)
+        if hk:
+            ass['dividend']['surplus_rate'] = {'value': 0.0,
+                                               'basis': 'IFRS无法定盈余公积科目, 计提率置0'}
+        for k in ('opex', 'working_capital', 'capex', 'dividend', 'financing'):
+            raw.setdefault(k, ass[k])
+        common = (_common_defaults(0.04, '通用默认(港股): 10年期美债收益率约4%(财报币种口径)')
+                  if hk else _common_defaults(0.02, '通用默认: 10年期国债收益率约2.0%'))
+        for k in ('wacc', 'scenarios', 'relative_val'):
+            raw.setdefault(k, common[k])
+        raw.setdefault('consensus',
+                       _derive_consensus(hist['is']['rev'], hist['is']['np_p'], fcst))
+        raw.setdefault('model', {'hist_years': years, 'fcst_years': fcst,
+                                 'valuation_date': today, 'build_date': today})
+        if quote is not None:
+            if hk:
+                ccy = hist_ccy or _guess_hk_ccy(raw) or '未知'
+                raw.setdefault('company', {
+                    'code': code, 'code_full': f'{code}.HK', 'name': quote['name'],
+                    'currency_note': f'{ccy}(财报口径) / 百万元 (每股数据为{ccy}; 港元现价按fx折算)',
+                    'unit': f'{ccy}百万元(财报口径)'})
+                raw.setdefault('cover', {
+                    'subtitle': f'{quote["name"]} | 港股自动兜底建模(东财HKF10+腾讯行情; 财报币种{ccy})'})
+            else:
+                raw.setdefault('company', {
+                    'code': code, 'code_full': f'{code}.{em_code(code)[:2]}',
+                    'name': quote['name'], 'currency_note': '人民币 / 百万元 (每股数据为元)'})
+                raw.setdefault('cover', {
+                    'subtitle': f'{quote["name"]} | 自动兜底建模(东财F10+腾讯行情)'})
 
 
 def main():
