@@ -1,0 +1,12 @@
+.git
+.gitignore
+.github
+.dockerignore
+Dockerfile
+__pycache__/
+*.pyc
+.venv/
+.cache/
+out/
+web/.data/
+.DS_Store
