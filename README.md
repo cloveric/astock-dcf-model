@@ -2,9 +2,9 @@
 
 # astock-dcf-model
 
-### 一行命令,产出可被机器验收的机构级三表联动估值模型
+### 从经营假设、三表预测到每股价值：一行命令生成可被机器验收的机构级估值模型
 
-**A 股 + 港股 · DCF/FCFE 双视图 · 全公式生成 · LibreOffice 重算布尔验收**
+**A 股 + 港股 · 分部量价驱动 · 三表 + 融资联动 · FCFF/FCFE + 相对估值 · 全公式生成**
 
 [![Version](https://img.shields.io/badge/version-0.6.2-1f6feb.svg)](./CHANGELOG.md)
 [![CI](https://github.com/cloveric/astock-dcf-model/actions/workflows/ci.yml/badge.svg)](https://github.com/cloveric/astock-dcf-model/actions)
@@ -14,7 +14,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 [快速上手](#-快速上手) ·
-[生成流程](#-一个模型如何生成) ·
+[估值建模](#-一个估值模型如何生成) ·
 [它长什么样](#-它长什么样) ·
 [为什么](#-为什么不用手工坊-excel) ·
 [架构](#-架构) ·
@@ -26,7 +26,7 @@
 
 ---
 
-> **“表配平”不等于“模型正确”。** 每一张生成的工作簿都能用 LibreOffice headless 重算，并接受配置来源、经济边界、历史尾差、场景口径、相对估值、FCFE/FCFF 分歧及 12 项工作簿门控的联合验收；CI 还会复现基准标的 DCF 每股 `340.415208186145` 元。机器闸门负责拒绝机械错误，投资假设仍需人工判断。
+> **估值不是只给利润乘一个倍数，“表配平”也不等于模型正确。** 本项目先把分部量价、利润率、周转率、Capex 与融资假设传导进三表，再分别计算 FCFF 与 FCFE，经折现、终值和 EV→Equity 桥得到每股价值；相对估值、三情景和敏感性矩阵负责交叉验证。LibreOffice 与机器闸门只负责拒绝机械错误，投资假设仍需人工判断。
 
 ## ⚡ 快速上手
 
@@ -45,18 +45,45 @@ python fetch_data.py --code 002463       # 换标的: 拉数生成 configs/00246
 
 精度最高的用法:复制 `configs/300476.yaml` 手工改写——**配置即研究底稿**,每条假设写清依据与日期。
 
-## 🧭 一个模型如何生成
+## 🧭 一个估值模型如何生成
+
+核心不是“把 Excel 写出来”，而是把**经营判断逐层传导为自由现金流、股权价值和每股价值**：
 
 ```mermaid
-flowchart LR
-    A["① 输入<br/>股票代码 / YAML"] --> B["② 读取数据<br/>精配置或公开数据兜底"]
-    B --> C["③ 严格校验<br/>结构 · 经济边界 · 反假配平"]
-    C --> D["④ 可选研究层<br/>DR · 共识 · 公告 · LLM"]
-    D --> E["⑤ 模型引擎<br/>三表 · FIN · DCF · FCFE"]
-    E --> F["⑥ 生成产物<br/>17+2 Sheets · addr.json"]
-    F --> G["⑦ 独立重算<br/>LibreOffice headless"]
-    G --> H["⑧ 机器裁决<br/>PASS / REVIEW / FAIL"]
+flowchart TB
+    A["① 事实层<br/>财报 · 行情 · 一致预期"] --> B["② 经营假设<br/>分部量×价 · 毛利率 · 费用率<br/>周转天数 · Capex · 税率"]
+    B --> C["③ 预测引擎<br/>收入 → 利润 → NWC → PPE"]
+    C --> D["④ 三表与融资联动<br/>IS · BS · CF · FIN<br/>revolver · cash sweep · 利息"]
+
+    D --> E["⑤A FCFF<br/>NOPAT + D&A − ΔNWC − Capex"]
+    D --> F["⑤B FCFE<br/>归母净利 + D&A − ΔNWC<br/>− Capex + 净新增借款"]
+    B --> G["⑥ 资本成本<br/>WACC · Ke · 永续 g"]
+
+    E --> H["⑦A 企业价值<br/>年中折现 + Gordon 终值<br/>EV → Equity 桥"]
+    G --> H
+    F --> I["⑦B 归母股权价值<br/>Ke 年中折现 + 正常化终值"]
+    G --> I
+
+    D --> J["⑧ 市场与风险交叉验证<br/>结构化可比 PE · 熊/基/牛<br/>WACC×g · 增速×PE · DPO"]
+    H --> K["⑨ 每股价值与 Football Field<br/>股权价值 ÷ 稀释股数<br/>各方法对照估值基准日现价"]
+    I --> K
+    J --> K
+    K --> L["⑩ 独立验收<br/>LibreOffice 重算<br/>PASS / REVIEW / FAIL"]
 ```
+
+### 价值是怎样算出来的
+
+| 模块 | 核心计算 | 它回答的问题 | 主要输出 |
+|---|---|---|---|
+| **经营预测** | 分部收入按量×价展开；毛利率、费用率、税率、周转天数、Capex 与折旧逐年驱动 | 公司未来靠什么增长，需要投入多少资本？ | Revenue_Segments、IS、Schedules、PPE |
+| **三表与融资** | IS/BS/CF 全公式联动；资金缺口由 revolver 补足，超额现金先还债、再转理财；利息按平均债务余额计算 | 增长是否真正转化为现金，资产负债表是否支撑预测？ | BS、CF、FIN、Equity_Roll |
+| **FCFF DCF** | `FCFF = NOPAT + D&A − ΔNWC − Capex`；按 WACC 年中折现，叠加 Gordon 终值 | 不考虑具体融资路径，整家企业值多少钱？ | EV → 加现金/金融资产、减债务/少数股东权益 → 归母股权价值 → 每股价值 |
+| **FCFE** | `FCFE = 归母净利 + D&A − ΔNWC − Capex + 净新增借款`；按 Ke 年中折现 | 在实际加杠杆或去杠杆路径下，归母股东可获得多少现金流？ | 直接得到归母股权价值及每股价值，并与 FCFF 差异勾稽 |
+| **相对估值** | 模型或已验证一致预期的 FY1/NTM 归母净利 × 正式计价可比 PE ÷ 稀释股数 | 市场正在用什么价格给同类盈利定价？ | PE 单点或区间；无结构化来源、日期和对账证据的可比不参与正式定价 |
+| **情景与敏感性** | 熊/基/牛使用同一简化 FCFF 引擎；另测 WACC×g、增速×PE、DPO | 结论对经营、折现率、终值和营运资本假设有多敏感？ | 下行/基准/上行边界及关键风险暴露 |
+| **Football Field** | 完整 FCFF、FCFE、同引擎情景及经验证相对估值并列，不机械求平均 | 不同方法是否指向相近价值区间，与基准日现价差多少？ | Summary 综合参考区间与方法分歧 |
+
+### 程序、数据与 AI 的边界
 
 | 核心问题 | 当前规则 |
 |---|---|
@@ -72,7 +99,7 @@ python build_model.py --code 300476          # 默认：纯确定性建模，不
 python build_model.py --code 300476 --llm    # 可选：Codex → Claude → Kimi 生成研究备忘录
 ```
 
-这是 1 分钟总览；下方[架构图](#-架构)、[验证记录](#-验证记录)与[工作表清单](#-工作表清单-17--2)继续展开实现细节和可复现证据。
+这是首页总览；下方[架构图](#-架构)、[方法论](#-方法论)、[验证记录](#-验证记录)与[工作表清单](#-工作表清单-17--2)继续展开公式、实现细节和可复现证据。
 
 ## 📸 它长什么样
 
