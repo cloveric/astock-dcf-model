@@ -616,3 +616,5 @@ relative_val:
     - {name: "澜起科技", code: "688008.SH", mcap: 2748.0, pe_ttm: 107.45, np_f0: 25.6, np_f1: 25.6, src: "A股内存接口(受益同周期, 非制造对标); 腾讯行情2026-08-18; np为TTM占位待核; 不进beta中位数"}
 cover:
   subtitle: 长鑫科技 | 自动兜底建模(东财F10+腾讯行情)
+checks:
+  fcfe_divergence_waiver: '已复核：2026E现金调度一次性净偿债约725.7亿元，使动态杠杆FCFE显著低于恒定资本结构FCFF；差异保留并分别列示，不作为机械配平项。'

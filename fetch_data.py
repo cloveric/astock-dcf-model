@@ -34,22 +34,70 @@
 """
 import argparse
 import datetime
+import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 EM_BASE = 'https://emweb.securities.eastmoney.com/PC_HSF10'
+_FETCH_MANIFEST = []
+_FETCH_MANIFEST_LOCK = threading.Lock()
+_RAW_SNAPSHOT_DIR = None
+
+
+def _utc_timestamp():
+    """Return an RFC 3339 UTC timestamp for source-lineage records."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def reset_fetch_manifest(raw_dir=None):
+    """Clear lineage and optionally enable content-addressed raw snapshots."""
+    global _RAW_SNAPSHOT_DIR
+    with _FETCH_MANIFEST_LOCK:
+        _FETCH_MANIFEST.clear()
+        _RAW_SNAPSHOT_DIR = Path(raw_dir).resolve() if raw_dir is not None else None
+        if _RAW_SNAPSHOT_DIR is not None:
+            _RAW_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_fetch_manifest():
+    """Return a defensive copy of successful public-data request lineage."""
+    with _FETCH_MANIFEST_LOCK:
+        return [dict(item) for item in _FETCH_MANIFEST]
 
 
 def curl_get(url, referer='https://emweb.securities.eastmoney.com/', timeout=30):
-    """系统curl取数 (不用python直连, 避免反爬)"""
+    """系统curl取数，并记录可审计的时间、响应大小与内容哈希。"""
     cmd = ['curl', '-s', '--compressed', '--max-time', str(timeout),
            '-H', f'User-Agent: {UA}', '-H', f'Referer: {referer}', url]
     out = subprocess.run(cmd, check=True, capture_output=True, timeout=timeout + 10)
+    record = {
+        'url': url,
+        'fetched_at': _utc_timestamp(),
+        'bytes': len(out.stdout),
+        'sha256': hashlib.sha256(out.stdout).hexdigest(),
+    }
+    with _FETCH_MANIFEST_LOCK:
+        if _RAW_SNAPSHOT_DIR is not None:
+            url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]
+            snapshot = _RAW_SNAPSHOT_DIR / f'{url_hash}_{record["sha256"]}.bin'
+            try:
+                with snapshot.open('xb') as fh:
+                    fh.write(out.stdout)
+            except FileExistsError:
+                if hashlib.sha256(snapshot.read_bytes()).hexdigest() != record['sha256']:
+                    raise RuntimeError(f'原始取数快照哈希冲突: {snapshot}')
+            except OSError as exc:
+                raise RuntimeError(f'保存原始取数快照失败: {snapshot}: {exc}') from exc
+            record['snapshot'] = str(snapshot)
+        _FETCH_MANIFEST.append(record)
     return out.stdout
 
 
@@ -156,7 +204,7 @@ def fetch_composition(code):
     return out
 
 
-def fetch_interim(code, last_annual_year):
+def fetch_interim(code, last_annual_year, status_out=None):
     """A股中报/季报抓取 (拐点锚定用): 依次尝试当年(=last_annual_year+1)的
     09-30/06-30/03-31利润表, 取最新已披露的一期, 并带上年同期做对照.
     lrbAjaxNew 的 dates 参数支持多期并列且只返回已存在的报告期(实测688825:
@@ -167,8 +215,12 @@ def fetch_interim(code, last_annual_year):
     返回 dict {label('2026Q1'/'2026H1'/'2026Q3'), date, months(3/6/9), rev, np_p, np,
     cost(可None), rev_prior, np_p_prior} — 单位统一百万(复用_m口径), 上年同期缺失时
     prior字段为None; 当年任何一期都不存在→返回None(正常, 不报错).
-    锚定属增强路径: 网络/解析异常同样返回None退回纯年报锚定, 不阻断兜底建模主流程
-    (系统性断网时并发的年报抓取会另行显式报错, 此处不会掩盖故障)."""
+    锚定属增强路径: 无披露返回None并标记not_available；网络/解析异常也不阻断主流程，
+    但会标记error并输出告警，避免把“取数失败”伪装成“没有中期报告”."""
+    status = {'source': 'eastmoney_interim'}
+    if status_out is not None:
+        status_out.clear()
+        status_out.update(status)
     yr = int(last_annual_year) + 1
     mmdd = ('09-30', '06-30', '03-31')
     dates = [f'{yr}-{md}' for md in mmdd] + [f'{yr - 1}-{md}' for md in mmdd]
@@ -177,9 +229,16 @@ def fetch_interim(code, last_annual_year):
     try:
         payload = json.loads(curl_get(url))
         data = payload.get('data') if isinstance(payload, dict) else None
-    except Exception:
+    except Exception as exc:
+        status.update({'status': 'error', 'error': f'{type(exc).__name__}: {exc}'})
+        if status_out is not None:
+            status_out.update(status)
+        print(f'WARNING: 中期数据抓取失败({code}): {exc}', file=sys.stderr)
         return None
     if not data:
+        status['status'] = 'not_available'
+        if status_out is not None:
+            status_out.update(status)
         return None
     rows = {str(r.get('REPORT_DATE', ''))[:10]: r for r in data}
     for md, months, qlab in (('09-30', 9, 'Q3'), ('06-30', 6, 'H1'), ('03-31', 3, 'Q1')):
@@ -193,7 +252,7 @@ def fetch_interim(code, last_annual_year):
         prow = rows.get(f'{yr - 1}-{md}') or {}
         rev_p = _g(prow, 'TOTAL_OPERATE_INCOME')
         np_p_p = _g(prow, 'PARENT_NETPROFIT')
-        return {
+        result = {
             'label': f'{yr}{qlab}', 'date': f'{yr}-{md}', 'months': months,
             'rev': _m(rev),
             'np_p': _m(_g(row, 'PARENT_NETPROFIT') or 0.0),
@@ -202,6 +261,13 @@ def fetch_interim(code, last_annual_year):
             'rev_prior': _m(rev_p) if rev_p is not None else None,
             'np_p_prior': _m(np_p_p) if np_p_p is not None else None,
         }
+        status.update({'status': 'ok', 'report_date': result['date']})
+        if status_out is not None:
+            status_out.update(status)
+        return result
+    status['status'] = 'not_available'
+    if status_out is not None:
+        status_out.update(status)
     return None
 
 
@@ -271,11 +337,33 @@ def _interim_gm_path(interim, hist_gm):
     if cost is None or not rev or rev <= 0:
         return None
     gm_i = 1.0 - cost / rev
+    if not math.isfinite(gm_i) or not -1.0 <= gm_i <= 1.0:
+        raise ValueError(
+            f'{interim.get("label") or "中期"}毛利率{gm_i:.1%}超出[-100%,100%]，'
+            '疑似营业成本字段映射或单位错误，拒绝用于预测锚定')
     mid = (gm_i + sum(hist_gm) / len(hist_gm)) / 2.0
     vals = [round(gm_i + (mid - gm_i) * i / 4.0, 4) for i in range(5)]
     basis = (f'首年按{interim.get("label") or "中期"}实际毛利率{gm_i:.1%}, '
              f'5年滑向周期中枢{mid:.1%}(自动推导: (中期毛利率+历史毛利率均值)/2)')
     return vals, basis
+
+
+def _guard_hk_residual(name, value, total, year, abs_tol=1.0, rel_tol=1e-4):
+    """Reject material negative HKF10 residual buckets.
+
+    A tiny negative caused by source rounding is snapped to zero by the caller.
+    A material negative means mapped components exceed the reported subtotal and
+    must be investigated instead of being labelled as an ordinary balancing item.
+    """
+    if not all(math.isfinite(float(v)) for v in (value, total)):
+        raise RuntimeError(f'HKF10 {year}年{name}轧差不是有限数，拒绝建模')
+    tolerance = max(abs_tol, abs(float(total)) * rel_tol)
+    if value < -tolerance:
+        ratio = abs(value) / max(abs(float(total)), 1.0)
+        raise RuntimeError(
+            f'HKF10 {year}年{name}出现重大负轧差: {value:.1f}，'
+            f'占对应合计{ratio:.1%}；疑似核心科目缺失或映射错误，拒绝“假配平”')
+    return value
 
 
 def _derive_consensus(rev_hist, np_hist, fcst_years, interim=None):
@@ -620,25 +708,30 @@ def build_hist_hk(code, years, interim_out=None):
         sc, cr, oci = bi('股本'), bi('股本溢价'), bi('其他储备')
         re_ = bi('保留溢利(累计亏损)')
         tpe = bi('股东权益')
+        oca = _guard_hk_residual('oca', tca - cash - tfa - ar - pre - inv, tca, y)
+        onca = _guard_hk_residual('onca', tnca - ppe - ia - dta - oei, tnca, y)
+        ocl = _guard_hk_residual('ocl', tcl - stl - ap - contract - taxp - cur1y, tcl, y)
+        oncl = _guard_hk_residual('oncl', tncl - ltl - lease, tncl, y)
+        oeq = _guard_hk_residual('oeq', tpe - sc - cr - oci - re_, tpe, y)
         bs_d['cash'].append(_m(cash)); bs_d['tfa'].append(_m(tfa))
         bs_d['ar'].append(_m(ar)); bs_d['pre'].append(_m(pre)); bs_d['orec'].append(0.0)
         bs_d['inv'].append(_m(inv))
-        bs_d['oca'].append(_m(tca - cash - tfa - ar - pre - inv))    # 轧差
+        bs_d['oca'].append(_m(oca))                                  # 轧差(负数受守卫)
         bs_d['ppe'].append(_m(ppe)); bs_d['rou'].append(0.0)         # IFRS使用权资产未单列
         bs_d['ia'].append(_m(ia)); bs_d['gw'].append(0.0); bs_d['lpe'].append(0.0)
         bs_d['dta'].append(_m(dta)); bs_d['oei'].append(_m(oei))
-        bs_d['onca'].append(_m(tnca - ppe - ia - dta - oei))         # 轧差(含联营公司权益)
+        bs_d['onca'].append(_m(onca))                                # 轧差(含联营公司权益)
         bs_d['stl'].append(_m(stl)); bs_d['ap'].append(_m(ap))
         bs_d['contract'].append(_m(contract)); bs_d['staff'].append(0.0)
         bs_d['taxp'].append(_m(taxp)); bs_d['opay'].append(0.0)
         bs_d['cur1y'].append(_m(cur1y))
-        bs_d['ocl'].append(_m(tcl - stl - ap - contract - taxp - cur1y))  # 轧差
+        bs_d['ocl'].append(_m(ocl))                                  # 轧差
         bs_d['ltl'].append(_m(ltl)); bs_d['lease'].append(_m(lease))
-        bs_d['oncl'].append(_m(tncl - ltl - lease))                  # 轧差(含递延收入/递延税项负债)
+        bs_d['oncl'].append(_m(oncl))                                # 轧差(含递延收入/递延税项负债)
         bs_d['sc'].append(_m(sc)); bs_d['cr'].append(_m(cr)); bs_d['ts'].append(0.0)
         bs_d['oci'].append(_m(oci)); bs_d['sr'].append(0.0)          # IFRS无法定盈余公积
         bs_d['re'].append(_m(re_))
-        bs_d['oeq'].append(_m(tpe - sc - cr - oci - re_))            # 轧差
+        bs_d['oeq'].append(_m(oeq))                                  # 轧差
         bs_d['mi'].append(_m(bi('少数股东权益')))
 
         C = cfs[y]
@@ -719,9 +812,11 @@ def build_segments_hk(hist, years, interim=None):
     }]
 
 
-def build_fallback_config_hk(code):
+def build_fallback_config_hk(code, raw_dir=None, _manifest_initialized=False):
     """港股全自动兜底: 腾讯hk行情 + 东财HKF10三表(IFRS) → 完整配置dict
     中期锚定尽力而为: 复用收益表长表已拉回的中报/季报行(零额外请求)做收入锚定"""
+    if not _manifest_initialized:
+        reset_fetch_manifest(raw_dir=raw_dir)
     code = str(code)
     quote = fetch_quote(code)
     today = datetime.date.today().isoformat()
@@ -755,6 +850,10 @@ def build_fallback_config_hk(code):
         'scenarios': common['scenarios'],
         'hist': {k: v for k, v in hist.items() if k in ('is', 'bs', 'cf', 'ppe_split')},
         'relative_val': common['relative_val'],
+        'data_lineage': {'generated_at_utc': _utc_timestamp(),
+                         'requests': get_fetch_manifest(),
+                         'interim': {'source': 'eastmoney_hkf10_income',
+                                     'status': 'ok' if interim else 'not_available'}},
         'cover': {'subtitle': f'{quote["name"]} | 港股自动兜底建模(东财HKF10+腾讯行情; 财报币种{ccy})'},
     }
     return cfg
@@ -1053,21 +1152,23 @@ def derive_assumptions(hist, fcst_years, interim=None):
     }
 
 
-def build_fallback_config(code):
+def build_fallback_config(code, raw_dir=None):
     """全自动兜底: 拉公开数据 + 推导假设 → 完整配置dict (港股走HKF10路径)"""
+    reset_fetch_manifest(raw_dir=raw_dir)
     code = str(code)
     if is_hk(code):
-        return build_fallback_config_hk(code)
+        return build_fallback_config_hk(code, _manifest_initialized=True)
     today = datetime.date.today().isoformat()
     years = default_hist_years()
     # 效率: 行情+三表+主营构成+当年中期实绩共6个curl并发抓取
+    interim_status = {}
     quote, lrb, zcfzb, xjllb, comp, interim = _parallel([
         lambda: fetch_quote(code),
         lambda: fetch_f10_statement(code, 'lrb', years),
         lambda: fetch_f10_statement(code, 'zcfzb', years),
         lambda: fetch_f10_statement(code, 'xjllb', years),
         lambda: fetch_composition(code),
-        lambda: fetch_interim(code, years[-1]),   # 无中期披露→None(不锚定, 走原逻辑)
+        lambda: fetch_interim(code, years[-1], status_out=interim_status),
     ])
     hist = build_hist(code, years, tables=(lrb, zcfzb, xjllb))
     segs = (build_segments(comp, years, interim=interim, rev0=hist['is']['rev'][-1])
@@ -1095,6 +1196,9 @@ def build_fallback_config(code):
         'scenarios': common['scenarios'],
         'hist': hist,
         'relative_val': common['relative_val'],
+        'data_lineage': {'generated_at_utc': _utc_timestamp(),
+                         'requests': get_fetch_manifest(),
+                         'interim': interim_status},
         'cover': {'subtitle': f'{quote["name"]} | 自动兜底建模(东财F10+腾讯行情)'},
     }
     return cfg
@@ -1193,11 +1297,19 @@ def main():
     ap.add_argument('--out', help='配置输出路径 (默认 configs/<code>.yaml)')
     ap.add_argument('--stdout', action='store_true', help='打印到stdout而不写文件')
     ap.add_argument('--quote-only', action='store_true', help='只打印行情快照')
+    ap.add_argument('--raw-dir', help='原始响应不可变快照目录(默认 data/raw/<code>/<UTC时间>)')
+    ap.add_argument('--no-raw-snapshot', action='store_true',
+                    help='不保存原始响应；仍会在配置 data_lineage 中记录URL/时间/大小/SHA-256')
     args = ap.parse_args()
     if args.quote_only:
         print(json.dumps(fetch_quote(args.code), ensure_ascii=False, indent=1))
         return
-    cfg = build_fallback_config(args.code)
+    raw_dir = None
+    if not args.no_raw_snapshot:
+        raw_dir = args.raw_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'data', 'raw', str(args.code),
+            _utc_timestamp().replace(':', '').replace('-', ''))
+    cfg = build_fallback_config(args.code, raw_dir=raw_dir)
     import yaml
     text = ('# 自动生成(fetch_data.py兜底模式) — 所有假设的"依据"字段注明推导规则, '
             '请按研究修正; 一致预期/可比公司建议手工补充\n'

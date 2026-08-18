@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """离线冒烟校验 (CI用, 不依赖LibreOffice/外网):
    python tests/smoke_check.py <model.xlsx> [model.addr.json]
-校验: 17张基础工作表齐全 / named ranges≥10 / Checks页含12项校验 /
+校验: 17张基础工作表齐全 / named ranges≥10 / Checks页含13项编号校验 /
      FCFE页关键行存在 / addr.json关键地址可解析。
 """
 import json
@@ -30,7 +30,7 @@ def main():
         fails.append(f'named ranges不足10个: {n_names}')
 
     chk_labels = [wb['Checks'].cell(row=r, column=1).value or '' for r in range(1, 40)]
-    for i in range(1, 13):
+    for i in range(1, 14):
         if not any(str(l).startswith(f'{i}.') for l in chk_labels):
             fails.append(f'Checks缺第{i}项校验行')
 
@@ -62,7 +62,7 @@ def main():
         for f in fails:
             print(' -', f)
         sys.exit(1)
-    print(f'SMOKE PASS: {len(BASE_SHEETS)}表齐全, {n_names}个named ranges, Checks 12项, addr完整')
+    print(f'SMOKE PASS: {len(BASE_SHEETS)}表齐全, {n_names}个named ranges, Checks 13项, addr完整')
 
 
 if __name__ == '__main__':

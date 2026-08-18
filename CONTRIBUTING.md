@@ -6,8 +6,8 @@
 
 1. **预测期零硬编码**: 预测期所有单元格必须由假设驱动的公式生成; 硬编码仅限历史实际值(绿色)与蓝色假设输入。
 2. **每条假设必须带依据**: YAML 中每个假设条目必须携带 `basis` 文字字段, 会写入 Assumptions 页备注列。无依据的假设不予合入。
-3. **三表严格配平**: BS 配平差额全期必须 < 0.01, 不允许手填轧差; 配平只能由 FIN 页 revolver/sweep 机制完成。
-4. **Checks 全 TRUE**: 提交前必须本地跑通 `python verify_model.py --code 300476`(需 LibreOffice), Checks 布尔汇总必须为 TRUE。
+3. **三表严格配平**: BS 配平差额全期必须 < 0.01；历史原始数据先独立扎口，只允许微小舍入尾差，重大差额或重大负残余科目必须拒绝，不能塞进“其他”科目。
+4. **Checks 与语义验证全通过**: 提交前必须本地跑通 `python verify_model.py --code 300476`(需 LibreOffice)，12 个工作簿门控及外部语义控制必须为 PASS/经审阅的 WAIVED。
 5. **基准复现**: 改动不得改变胜宏科技(300476)基准输出 —— DCF 每股 340.415208186145 元; 新增 sheet/新增行除外, 既有单元格数值必须零差异。
 6. **数据源纪律**: 东财一律经系统 `curl` 子进程获取(python 不直连东财); 一致预期等付费源不直连, 走 `--consensus` 文件输入。
 7. **研究层默认关闭**: `--dr/--consensus/--announcements/--llm` 不传时, 输出必须与基础模型完全一致。
@@ -15,7 +15,8 @@
 ## 开发流程
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements-dev.lock
+python -m pytest -q
 python build_model.py --code 300476          # 构建
 python verify_model.py --code 300476         # LibreOffice 重算验收
 python tests/smoke_check.py out/300476_胜宏科技_估值模型.xlsx   # 离线冒烟

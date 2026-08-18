@@ -2,6 +2,38 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-08-18
+
+基于对 `2677eaa` 的第二轮全面审计，修复 3 个 Critical、6 个 High、5 个 Medium 问题。重点是把“工作簿能配平”与“输入和估值逻辑可信”分开验收。
+
+### 估值与数据正确性
+
+- **拒绝假配平**：构建前独立扎口历史 BS，重大差额及 `oca/onca/ocl/oncl/oeq` 重大负残余直接失败；只允许 `max(0.5 百万, 总资产×1e-5)` 以内舍入尾差，并把修正金额/占比写入 `addr.meta.historical_plugs`。中芯国际 2023 的 29,456.4 百万美元巨额补差不再被掩盖，该不完整年度已从 `configs/00981.yaml` 删除。
+- **修正 PE 集合依赖**：正式 PE 中位数依赖计价可比集合，不再错误依赖 beta 集合；同时把 TTM/“待核占位”从 forward 定价集合剔除。688825 的六个未验证占位不再产生 64.4x 假 forward 中位数。
+- **统一情景口径**：熊/基/牛全部用同一简化 FCFF 引擎横向比较，完整三表主模型单列桥接；新增三情景 DCF/相对估值单调性门控。
+- **语义标签与币种**：自动推导改名“模型自动外推”且不进入经验证 Summary 包络；外部一致预期按“字段 × 年份”逐项认证，部分文件不会再把未覆盖的营收/归母或年份连带标成已验证，“待核/占位/平推”依据也被拒绝。正式 forward 可比同样需有可验证依据。港股全簿与验证器统一显示美元/股或港元/股。
+- **FCFE 复核**：FCFE/FCFF 差异达到 30% 时返回 REVIEW；只有配置中的非空复核理由或 CLI 显式豁免才标为 WAIVED。00981 与 688825 保留原始差异并记录动态杠杆/一次性去杠杆理由，不做机械配平。
+
+### 输入、血缘与验收
+
+- 新增 `model_validation.py` / `model_labels.py`：严格 YAML 重复键、精确向量长度、连续年份、有限数、正价格/股数、税率/利率/毛利率、场景顺序、WACC−g≥50bp、依据字段和历史 BS 扎口。
+- `fetch_data.py` 区分中期报告“抓取失败”与“尚无披露”；拒绝超出 [−100%,100%] 的中期毛利率及 HKF10 重大负残余；记录请求 URL/UTC 时间/字节数/SHA-256，并默认保存内容寻址原始快照。
+- 构建新增 `--refresh`、`--as-of`、`--stale-after-days`、`--fail-on-stale`、`--require-interim`；抓取失败会进入 Cover/Checks，不再静默退回旧年报。
+- `verify_model.py` 输出 schema v1 JSON；PASS/FAIL/REVIEW 分别返回 0/1/2。新增黄金值来源/指纹、WACC-g、真实相对中位数、场景单调性、毛利率硬边界、历史 plug 重大性、币种和 FCFE 分歧控制。默认配置 hash 漂移改为失败，自定义配置不误套黄金值。
+
+### Web、供应链与工程化
+
+- Web 状态拆为 `verified / built_unverified / failed_validation / failed`；只有验证进程退出码 0、JSON verdict PASS、JSON exit_code 0 三者一致才算 verified，默认仅 verified 可下载。
+- 所有 `/api` 支持 Bearer token，非回环绑定强制 `WEB_API_TOKEN`；活跃队列和请求体设硬上限；Web LLM 默认关闭。前端支持 token、明确显示验收状态。
+- Docker 以非 root 用户运行，Python base 固定 digest，依赖从带哈希 lock 安装；CI Actions 固定 commit SHA。
+- CI 升级为 Python 3.10/3.12/3.14 全量 pytest + Ruff，并遍历所有 checked-in 配置做 build/smoke/LibreOffice/verify；因此最低 Python 版本由 3.9 调整为 **3.10**。
+- 新增 76 个针对性回归用例；全套共 **92 tests**。四个配置 LibreOffice 结构化验收均 PASS，300476 黄金值精确保持 `340.415208186145`。
+
+### 文档纠偏
+
+- README 不再宣称“配平即可证明模型正确”，Checks 更新为 13 个编号项（12 个门控 + 1 个信息项），并同步 Web 鉴权、四配置验收、00981 数据缺口、688825 可比口径及 Python 3.10+。
+- 本环境没有 Docker CLI，本版本仅完成 Dockerfile 静态审查，未把镜像 build 写成已验证事实。
+
 ## [0.5.1] - 2026-08-18
 
 ### 新增

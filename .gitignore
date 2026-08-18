@@ -3,8 +3,12 @@ out/
 .cache/
 __pycache__/
 *.pyc
+.coverage
+.pytest_cache/
+.ruff_cache/
 web/.data/
-.venv/
+data/raw/
+.venv*/
 
 # 模型产物默认不入库 (examples/ 下的样例除外)
 *.xlsx

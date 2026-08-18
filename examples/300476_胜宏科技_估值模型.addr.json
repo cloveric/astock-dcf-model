@@ -16,7 +16,43 @@
    2030
   ],
   "valuation_date": "2026-08-14",
-  "research_sheets": []
+  "research_sheets": [],
+  "config_path": "configs/300476.yaml",
+  "config_sha256": "590d14283ce2f28665b2b0bf356054b4332a23da2dd624f6a00cc2ec8c7baea0",
+  "is_default_config": true,
+  "currency_code": "CNY",
+  "per_share_unit": "元/股",
+  "historical_plugs": [
+   {
+    "year": 2024,
+    "diff": 0.09999999999490683,
+    "assets": 19175.399999999998,
+    "ratio": 5.215015071127947e-06
+   },
+   {
+    "year": 2025,
+    "diff": 0.10000000000582077,
+    "assets": 35244.6,
+    "ratio": 2.8373140851597344e-06
+   }
+    ],
+    "scenario_engine": "simplified_same_engine_v1",
+    "consensus_rev_verified": true,
+    "consensus_np_verified": true,
+    "consensus_verified_by_year": {
+      "rev": {
+        "2026": true,
+        "2027": true,
+        "2028": true
+      },
+      "np": {
+        "2026": true,
+        "2027": true,
+        "2028": true
+      }
+    },
+    "fcfe_divergence_waiver": "",
+  "interim_status": ""
  },
  "dcf_ps": "DCF!D26",
  "dcf_upside": "DCF!D28",
@@ -45,14 +81,18 @@
   "FCFE_PS": "FCFE!$D$20"
  },
  "bs_chk_row": 47,
- "checks_sum": "Checks!F24",
- "checks_bool": "Checks!F25",
+ "checks_sum": "Checks!F28",
+ "checks_bool": "Checks!F29",
  "scen_bear_ps": "Scenarios!B12",
  "scen_base_ps": "Scenarios!B21",
- "scen_bull_ps": "Scenarios!B31",
+ "scen_bull_ps": "Scenarios!B30",
  "scen_bear_rel": "Scenarios!B13",
  "scen_base_rel": "Scenarios!B22",
- "scen_bull_rel": "Scenarios!B32",
+ "scen_bull_rel": "Scenarios!B31",
+ "scen_main_ps": "Scenarios!B34",
+ "scen_full_simplified_ratio": "Scenarios!B36",
+ "scen_full_simplified_status": "Scenarios!B37",
+ "scen_monotonic_check": "Checks!B16",
  "is_rev": {
   "2023": "IS!B4",
   "2024": "IS!C4",
@@ -76,6 +116,11 @@
  "rel_lo": "Relative_Val!C17",
  "rel_hi": "Relative_Val!C18",
  "rel_med_pe": "Relative_Val!$F$10",
+ "relative_price_rows": [
+  "Relative_Val!F5",
+  "Relative_Val!F6"
+ ],
+ "rel_median_cell": "Relative_Val!$F$10",
  "sens_center": "Sensitivity!E8",
  "wacc_calc": "Assumptions!C89",
  "wacc_used": "Assumptions!C91",
@@ -100,8 +145,8 @@
  "bs_cash_row": 4,
  "bs_tfa_row": 5,
  "eq_shares": "Equity_Roll!C21",
- "summary_env": "Summary!C12",
- "summary_env_hi": "Summary!D12",
+ "summary_env": "Summary!C13",
+ "summary_env_hi": "Summary!D13",
  "dpo_center": "Sensitivity!C27",
  "is_fin_row": 13,
  "fin_finnet_row": 67,
@@ -119,5 +164,8 @@
   118,
   134
  ],
- "cf_cash1_row": 19
+ "cf_cash1_row": 19,
+ "fcfe_control": "FCFE!D23",
+ "checks_fcfe_control": "Checks!B23",
+ "summary_fcfe_control": "Summary!B26"
 }

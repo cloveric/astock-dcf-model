@@ -30,6 +30,8 @@ DCF年中折现; FCFE股权现金流双视图; 关键驱动named range审计轨�
 单位: 人民币百万元(除标注外); 输入蓝/公式黑/外链绿/警告红。
 """
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import sys
@@ -37,6 +39,19 @@ import sys
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from model_labels import (
+    consensus_label,
+    consensus_year_is_verified,
+    derive_currency_labels,
+    forward_earnings_verified,
+)
+from model_validation import (
+    historical_balance_totals,
+    load_yaml_strict,
+    prepare_historical_bs,
+    validate_config,
+)
 
 # ============================================================
 # 配置加载与规范化
@@ -65,20 +80,24 @@ def _norm_entry(e):
 
 
 def _broadcast(vals, n):
-    """标量广播为n元列表; 列表长度不足则末值顺延"""
+    """标量显式广播为n元列表; 向量必须精确匹配, 禁止静默截断/补齐。"""
     if isinstance(vals, (list, tuple)):
         vals = list(vals)
-        if len(vals) >= n:
-            return vals[:n]
-        return vals + [vals[-1]] * (n - len(vals))
+        if len(vals) != n:
+            raise ValueError(f'配置错误: assumption vector length must be exactly {n} (got {len(vals)}); use a scalar for explicit broadcasting')
+        return vals
     return [vals] * n
 
 
 class Cfg:
     """配置访问封装: e(path) 取假设条目, v(path) 取值, s(path) 取字符串"""
 
-    def __init__(self, raw):
+    def __init__(self, raw, source_path=None, is_default_config=False, config_sha256=None):
         self.raw = raw
+        self.source_path = os.path.abspath(source_path) if source_path else None
+        self.is_default_config = bool(is_default_config)
+        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        self.config_sha256 = config_sha256 or hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
     def get(self, path, default=None):
         node = self.raw
@@ -103,15 +122,77 @@ class Cfg:
         return node
 
 
-def load_config(code=None, config_path=None, allow_fallback=True):
-    """加载YAML配置; 缺segments/缺hist时经fetch_data走兜底模式补全"""
-    import yaml
+def _as_date(value, label):
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    try:
+        return datetime.date.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'配置错误: {label} 必须是 YYYY-MM-DD 日期') from exc
+
+
+def _enforce_freshness(raw, *, as_of=None, stale_after_days=30,
+                       fail_on_stale=False, require_interim=False, source='配置'):
+    """Apply look-ahead, staleness and latest-report gates to a loaded config."""
+    reference = _as_date(as_of, '--as-of') if as_of else datetime.date.today()
+    model = raw.get('model') if isinstance(raw, dict) else None
+    valuation_date = (model or {}).get('valuation_date')
+    if valuation_date:
+        valuation = _as_date(valuation_date, 'model.valuation_date')
+        if valuation > reference:
+            raise ValueError(
+                f'配置错误: model.valuation_date={valuation} 晚于 --as-of {reference}，'
+                '拒绝使用未来数据')
+        if stale_after_days is not None:
+            if isinstance(stale_after_days, bool) or stale_after_days < 0:
+                raise ValueError('配置错误: stale_after_days 必须是非负整数或None')
+            age = (reference - valuation).days
+            if age > stale_after_days:
+                message = (f'配置已过期: {source}估值日{valuation}距as-of {reference}已有'
+                           f'{age}天，阈值{stale_after_days}天')
+                if fail_on_stale:
+                    raise ValueError(message)
+                print(f'WARNING: {message}', file=sys.stderr)
+    elif fail_on_stale:
+        raise ValueError('配置已过期: 缺少 model.valuation_date，无法证明数据新鲜度')
+    else:
+        print('WARNING: 配置缺少 model.valuation_date，无法判断数据新鲜度', file=sys.stderr)
+
+    if require_interim:
+        interim = raw.get('interim') if isinstance(raw, dict) else None
+        lineage = raw.get('data_lineage') if isinstance(raw, dict) else None
+        fetch_state = ((lineage or {}).get('interim') or {}) if isinstance(lineage, dict) else {}
+        if (not isinstance(interim, dict) or interim.get('anchor') is not True
+                or fetch_state.get('status') == 'error'
+                or interim.get('fetch_status') == 'error'):
+            detail = fetch_state.get('error') or (interim or {}).get('basis') or '未提供有效中期锚点'
+            raise ValueError(f'require-interim 门控失败: {detail}')
+
+
+def load_config(code=None, config_path=None, allow_fallback=True, *, refresh=False,
+                as_of=None, stale_after_days=30, fail_on_stale=False,
+                require_interim=False):
+    """加载并校验YAML；可显式刷新公开兜底数据并执行新鲜度/中期门控。"""
+    is_default_config = config_path is None
     if config_path is None:
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    'configs', f'{code}.yaml')
-    if os.path.exists(config_path):
-        with open(config_path, encoding='utf-8') as f:
-            raw = yaml.safe_load(f)
+    if refresh:
+        if code is None and os.path.exists(config_path):
+            code = str(load_yaml_strict(config_path).get('company', {}).get('code') or '')
+        if not code:
+            raise ValueError('--refresh 需要 --code，或配置内 company.code')
+        print(f'显式刷新: 忽略现有配置数值，在内存中重建{code}公开数据兜底模型')
+        from fetch_data import build_fallback_config
+        raw = build_fallback_config(code)
+        source_hash = None
+        is_default_config = False
+    elif os.path.exists(config_path):
+        with open(config_path, 'rb') as source_file:
+            source_hash = hashlib.sha256(source_file.read()).hexdigest()
+        raw = load_yaml_strict(config_path)
         print(f'配置: {config_path}')
     else:
         if not allow_fallback:
@@ -121,13 +202,22 @@ def load_config(code=None, config_path=None, allow_fallback=True):
         print(f'配置文件不存在: {config_path} → 兜底模式(自动拉取{code}公开数据生成)')
         from fetch_data import build_fallback_config
         raw = build_fallback_config(code)
-    cfg = Cfg(raw)
+        source_hash = None
+    cfg = Cfg(raw, source_path=config_path if not refresh and os.path.exists(config_path) else None,
+              is_default_config=is_default_config, config_sha256=source_hash)
     need_fallback = not cfg.get('segments') or not cfg.get('hist')
     if need_fallback and allow_fallback:
         from fetch_data import apply_fallback
         code = code or cfg.get('company.code')
         apply_fallback(cfg.raw, code)
         print('兜底模式: 已用东财F10主营构成/三表自动补全缺失配置 (精度局限见README)')
+        cfg = Cfg(cfg.raw, source_path=cfg.source_path, is_default_config=is_default_config)
+    _enforce_freshness(
+        cfg.raw, as_of=as_of, stale_after_days=stale_after_days,
+        fail_on_stale=fail_on_stale, require_interim=require_interim,
+        source=cfg.source_path or f'{code or cfg.get("company.code")}公开数据',
+    )
+    validate_config(cfg.raw)
     return cfg
 
 
@@ -196,6 +286,7 @@ def sec(ws, r, text, ncols=10):
 # ============================================================
 
 def build(cfg, out_path, addr_path, research=None):
+    validate_config(cfg.raw)
     co = cfg.raw['company']
     NAME, CODE_FULL = co['name'], co['code_full']
     HIST = [int(y) for y in cfg.get('model.hist_years')]
@@ -211,6 +302,22 @@ def build(cfg, out_path, addr_path, research=None):
     VAL_DATE = cfg.get('model.valuation_date', '')
     BUILD_DATE = cfg.get('model.build_date', '')
     UNIT = cfg.get('company.unit', '人民币百万元')        # 港股配置可覆盖为财报币种口径
+    _currency = derive_currency_labels(co)
+    CURRENCY_CODE = _currency['currency_code']
+    PER_SHARE_UNIT = _currency['per_share_unit']
+    PS_DENOM = _currency['denomination']
+    _normalized_bs, HISTORICAL_PLUGS = prepare_historical_bs(cfg.raw)
+    FCFE_DIVERGENCE_WAIVER = str(cfg.get('checks.fcfe_divergence_waiver') or '').strip()
+    _interim_lineage = cfg.get('data_lineage.interim') or {}
+    INTERIM_STATUS = str(_interim_lineage.get('status') or '') if isinstance(_interim_lineage, dict) else ''
+    INTERIM_ERROR = ''
+    if INTERIM_STATUS == 'error':
+        INTERIM_ERROR = str(_interim_lineage.get('error') or _interim_lineage.get('detail') or '未提供错误详情')
+    _fcfe_waiver_excel = FCFE_DIVERGENCE_WAIVER.replace('"', '""')
+
+    def fcfe_control_formula(diff_ref):
+        return (f'=IF("{_fcfe_waiver_excel}"<>"","WAIVED: {_fcfe_waiver_excel}",'
+                f'IF(ABS({diff_ref})>=0.3,"警告: 差异≥30%, 复核债务调度/资本结构/终值","通过: 差异<30%"))')
     IS_HK = str(CODE_FULL).upper().endswith('.HK')
     YC = {y: get_column_letter(2 + i) for i, y in enumerate(YRS)}   # 报表页 B..
     AC = {y: get_column_letter(3 + i) for i, y in enumerate(FCST)}  # 假设页 C..
@@ -300,7 +407,7 @@ def build(cfg, out_path, addr_path, research=None):
         _px_basis = f'{_px_basis} | =港元{_px_hkd:g}/fx{_fx_hkd:g}={_px_val:.4f}'
     else:
         _px_val, _px_basis = cfg.v('market.price'), ab('market.price')
-    A['px'] = arow(r, '现价', '元/股', _px_val, _px_basis, 'x', PS); r += 1
+    A['px'] = arow(r, '现价', PER_SHARE_UNIT, _px_val, _px_basis, 'x', PS); r += 1
     A['sh'] = arow(r, '总股本', '百万股', cfg.v('market.shares'), ab('market.shares'), 'x', NUM); r += 1
     put(ws, r, 1, '总市值', 't'); put(ws, r, 2, '百万', 'g', align='center')
     put(ws, r, 3, '=C{}*C{}'.format(A['px'], A['sh']), 'f', NUM)
@@ -308,14 +415,44 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, AB_COL, f'=现价×总股本, 约{_mcap_yi:.0f}亿元, 与行情软件一致', 'g', size=9); A['mcap'] = r; r += 1
     r += 1
 
-    sec(ws, r, '二、市场一致预期与最新财报 (外部数据, 绿色)'); r += 1
     cons_rev = cfg.e('consensus.rev'); cons_np = cfg.e('consensus.np')
+    _external_consensus = (research or {}).get('consensus')
+
+    def _consensus_series(key):
+        if _external_consensus is None:
+            return None
+        values = _external_consensus.get(key) if isinstance(_external_consensus, dict) else None
+        return values if isinstance(values, dict) else {}
+
+    CONSENSUS_VERIFIED = {
+        'rev': {
+            y: consensus_year_is_verified(cons_rev['basis'], y, _consensus_series('rev'))
+            for y in FCST[:3]
+        },
+        'np': {
+            y: consensus_year_is_verified(cons_np['basis'], y, _consensus_series('np'))
+            for y in FCST[:3]
+        },
+    }
+    CONSENSUS_LABELS = {
+        key: {y: consensus_label(verified) for y, verified in by_year.items()}
+        for key, by_year in CONSENSUS_VERIFIED.items()
+    }
+    CONS_REV_LABEL = CONSENSUS_LABELS['rev'][F0]
+    CONS_NP_LABEL = CONSENSUS_LABELS['np'][F0]
+    CONS_NP_VERIFIED = CONSENSUS_VERIFIED['np'][F0]
+    _all_consensus_verified = all(
+        verified for by_year in CONSENSUS_VERIFIED.values() for verified in by_year.values()
+    )
+    _cons_section_label = ('市场一致预期' if _all_consensus_verified
+                           else '模型自动外推 / 经验证一致预期')
+    sec(ws, r, f'二、{_cons_section_label}与最新财报 (外部/衍生数据, 绿色)'); r += 1
     cons_rev_v = _broadcast(cons_rev['values'], 3)
     cons_np_v = _broadcast(cons_np['values'], 3)
     for i, y in enumerate(FCST[:3]):
-        A[f'c_rev{str(y)[2:]}'] = arow(r, f'一致预期{y}E营收', '百万', cons_rev_v[i],
+        A[f'c_rev{str(y)[2:]}'] = arow(r, f'{CONSENSUS_LABELS["rev"][y]}{y}E营收', '百万', cons_rev_v[i],
                                        f"{cons_rev['basis']}", 'x', NUM); r += 1
-        A[f'c_np{str(y)[2:]}'] = arow(r, f'一致预期{y}E归母净利', '百万', cons_np_v[i],
+        A[f'c_np{str(y)[2:]}'] = arow(r, f'{CONSENSUS_LABELS["np"][y]}{y}E归母净利', '百万', cons_np_v[i],
                                       f"{cons_np['basis']}", 'x', NUM); r += 1
     lq = cfg.raw.get('latest_quarter') or {}
     if lq:
@@ -1095,26 +1232,21 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 2 + YRS.index(y), f"={YC[y]}{I['np_p']}/{YC[y]}{I['rev']}", 'f', PCT)
     put(ws, r, NOTE_COL, f"{H0}A {_is_h['np_p'][-1]/_rev_h[-1]:.1%}", 'g', size=9)
     I['npm'] = r; r += 1
-    isf('eps', 'EPS(元/股)', lambda y: f"={YC[y]}{I['np_p']}/{EQs}!$C${Q['shares']}", f'=归母/稀释股数(Equity_Roll页, 现={cfg.v("market.shares")/100:.2f}亿股)', PS)
+    isf('eps', f'EPS({PER_SHARE_UNIT})', lambda y: f"={YC[y]}{I['np_p']}/{EQs}!$C${Q['shares']}", f'=归母/稀释股数(Equity_Roll页, 现={cfg.v("market.shares")/100:.2f}亿股)', PS)
     isf('ebit', 'EBIT (利润总额+财务费用)', lambda y: f"={YC[y]}{I['tprofit']}+{YC[y]}{I['fin']}", '供DCF页FCFF计算', NUM, True)
     ISs = 'IS'
 
     # ============================================================
     # BS 资产负债表
     # ============================================================
-    # --- 历史尾差修正: 先按现有输入计算各年差额, 把差额并入"其他权益项目(轧差)" ---
-    _bs = {k: list(v) for k, v in cfg.raw['hist']['bs'].items()}
-    _bs.setdefault('mi', [0.0] * NH)
+    # --- 历史尾差控制: 构建前已做物质性校验, 仅允许微小舍入差并入其他权益项目 ---
+    _bs = _normalized_bs
     _A_K = ['cash', 'tfa', 'ar', 'pre', 'orec', 'inv', 'oca', 'ppe', 'rou', 'ia', 'gw', 'lpe', 'dta', 'oei', 'onca']
     _L_K = ['stl', 'ap', 'contract', 'staff', 'taxp', 'opay', 'cur1y', 'ocl', 'ltl', 'lease', 'oncl']
     _E_K = ['sc', 'cr', 'oci', 'sr', 're', 'oeq', 'mi']
-    for i in range(NH):
-        ta = sum(_bs[k][i] for k in _A_K)
-        tle = sum(_bs[k][i] for k in _L_K) + sum(_bs[k][i] for k in _E_K) - _bs['ts'][i]
-        diff = round(ta - tle, 10)
-        if abs(diff) > 1e-9:
-            _bs['oeq'][i] = round(_bs['oeq'][i] + diff, 4)
-            print(f'尾差修正: {HIST[i]}A 尾差 {diff:+.4f} 并入其他权益项目 -> oeq={_bs["oeq"][i]}')
+    for plug in HISTORICAL_PLUGS:
+        print(f'尾差修正(仅舍入): {plug["year"]}A 尾差 {plug["diff"]:+.4f} '
+              f'(资产占比{plug["ratio"]:.2e}) 并入其他权益项目')
 
     _bs_notes = cfg.get('hist.notes') or {}
     ws = wb.create_sheet('BS')
@@ -1577,7 +1709,7 @@ def build(cfg, out_path, addr_path, research=None):
           'EV桥得归母口径股权价值须扣少数股东权益(账面值); 无少数股东权益的标的为0, 不影响结果')
     dcell('netadj', '净现金调整合计', f"=D{D['cash']}+D{D['tfa']}+D{D['oei']}+D{D['debt']}+D{D['mi']}", NUM, False, '供Sensitivity/Scenarios页引用')
     dcell('eq', '股权价值', f"=D{D['ev']}+D{D['netadj']}", NUM, True)
-    dcell('ps', '每股价值 (元)', f"=D{D['eq']}/{SH_REF}", PS, True, '=股权价值/稀释股数(Equity_Roll页)')
+    dcell('ps', f'每股价值 ({PER_SHARE_UNIT})', f"=D{D['eq']}/{SH_REF}", PS, True, '=股权价值/稀释股数(Equity_Roll页)')
     dcell('px', f'现价 ({VAL_DATE})', f"={ASheet}!$C${A['px']}", PS)
     dcell('upside', '隐含涨跌幅', f"=D{D['ps']}/D{D['px']}-1", PCT, True)
     dcell('ipe', f'隐含{F0}E P/E', f"=D{D['eq']}/{ISs}!{YC[F0]}{I['np_p']}", MULT, False, f'=股权价值/{F0}E归母')
@@ -1650,9 +1782,12 @@ def build(cfg, out_path, addr_path, research=None):
           f'=正常化FCFE{F1}×(1+g)/(Ke-g); Ke/g均为named range')
     ecell('pv_tv', 'PV(终值)', f"=D{E['tv']}*{YC[F1]}{E['df']}", NUM, False, f'终值按t={NF-0.5}折现(与DCF页一致)')
     ecell('eq', '股权价值 (FCFE口径)', f"=D{E['pv_sum']}+D{E['pv_tv']}", NUM, True, 'FCFE直接折现为股权价值, 无需净现金桥')
-    ecell('ps', '每股价值 (元)', f"=D{E['eq']}/SHARES_DIL", PS, True, '=股权价值/稀释股数(named range)')
-    ecell('ps_fcff', '对照: FCFF口径每股价值 (元)', f"={DCFs}!D{D['ps']}", PS, False, '=DCF页主输出')
+    ecell('ps', f'每股价值 ({PER_SHARE_UNIT})', f"=D{E['eq']}/SHARES_DIL", PS, True, '=股权价值/稀释股数(named range)')
+    ecell('ps_fcff', f'对照: FCFF口径每股价值 ({PER_SHARE_UNIT})', f"={DCFs}!D{D['ps']}", PS, False, '=DCF页主输出')
     ecell('diff', '两法差异 (FCFE/FCFF-1)', f"=D{E['ps']}/D{E['ps_fcff']}-1", PCT, True, ' Checks页含一致性信息行')
+    ecell('control', 'FCFE/FCFF差异控制 (阈值30%)',
+          fcfe_control_formula(f'D{E["diff"]}'),
+          None, True, '该状态为估值口径复核警报, 不替代两种方法各自的模型校验')
     put(ws, r, 1, '两法差异原因', 't', bold=True)
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=NOTE_COL)
     put(ws, r, 2, '①折现率不同: FCFF按WACC(全资本成本, 税盾在分母)折现, FCFE按Ke(纯股权成本)折现; '
@@ -1671,7 +1806,7 @@ def build(cfg, out_path, addr_path, research=None):
     # ============================================================
     ws = wb.create_sheet('Relative_Val')
     title_bar(ws, f'{NAME} — Relative_Val 可比公司相对估值 + Beta unlever/relever',
-              f'市值/PE-TTM为{VAL_DATE}收盘(腾讯行情); 预测归母为一致预期/分析师输入; L-O列: βl/(1+(1-t)D/E) unlever取中位→Assumptions按目标结构relever', 15)
+              f'市值/PE-TTM为{VAL_DATE}收盘(腾讯行情); 预测归母为{CONS_NP_LABEL}/分析师输入; L-O列: βl/(1+(1-t)D/E) unlever取中位→Assumptions按目标结构relever', 15)
     ws.column_dimensions['A'].width = 14
     for col, w in zip('BCDEFGHIJ', [10, 12, 10, 14, 11, 14, 11, 12, 10]):
         ws.column_dimensions[col].width = w
@@ -1687,6 +1822,7 @@ def build(cfg, out_path, addr_path, research=None):
     COMP_ROWS = []
     BETA_ROWS = []
     PRICE_ROWS = []
+    _prior_comp_source = ''
     for cp in comps:
         put(ws, r, 1, cp['name'], 't')
         put(ws, r, 2, cp['code'], 'g', align='center')
@@ -1698,7 +1834,13 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 8, f"=C{r}/G{r}", 'f', MULT)
         put(ws, r, 9, f"=G{r}/E{r}-1", 'f', PCT)
         put(ws, r, 10, f"=F{r}/(I{r}*100)", 'f', '0.00')
-        put(ws, r, 11, cp.get('src', ''), 'g', size=9, wrap=True)
+        _cp_source = str(cp.get('src') or '')
+        _pricing_ok = forward_earnings_verified(cp, _prior_comp_source)
+        _pricing_status = ('定价资格: 已验证FY1/NTM' if _pricing_ok
+                           else '定价资格: 排除(未验证远期盈利/仅参照)')
+        put(ws, r, 11, (_cp_source + ' | ' if _cp_source else '') + _pricing_status, 'g', size=9, wrap=True)
+        if _cp_source not in ('同上', '同上。'):
+            _prior_comp_source = _cp_source
         if cp.get('beta_l') is not None:
             put(ws, r, 12, cp['beta_l'], 'in', '0.00')
             put(ws, r, 13, cp['d_e'], 'in', PCT)
@@ -1708,7 +1850,7 @@ def build(cfg, out_path, addr_path, research=None):
         else:
             for cc in (12, 13, 14, 15):
                 put(ws, r, cc, '—', 'g', align='center')
-        if not cp.get('ref_only'):
+        if _pricing_ok:
             PRICE_ROWS.append(r)
         COMP_ROWS.append(r)
         r += 1
@@ -1746,7 +1888,7 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 6, f"=C{r}/E{r}", 'f', MULT, bold=True)
     put(ws, r, 7, f"={ASheet}!$C${A[f'c_np{_cy[1]}']}/100", 'f', NUM)
     put(ws, r, 8, f"=C{r}/G{r}", 'f', MULT)
-    put(ws, r, 11, f'{F0}E/{F0+1}E归母=一致预期; {cfg.v("market.pe_ttm_basis", "")}', 'g', size=9, wrap=True)
+    put(ws, r, 11, f'{F0}E/{F0+1}E归母={CONS_NP_LABEL}; {cfg.v("market.pe_ttm_basis", "")}', 'g', size=9, wrap=True)
     SH_ROW = r
     r += 2
     sec(ws, r, f'{NAME}定价 (基于模型基准{F0}E归母)', 15); r += 1
@@ -1773,19 +1915,19 @@ def build(cfg, out_path, addr_path, research=None):
     PE_HI = r; r += 1
     put(ws, r, 1, f'模型基准{F0}E归母(百万)', 't'); put(ws, r, 3, f"={ISs}!{YC[F0]}{I['np_p']}", 'f', NUM)
     NP26 = r; r += 1
-    put(ws, r, 1, '对应股价下限(元)', 't', bold=True)
+    put(ws, r, 1, f'对应股价下限({PS_DENOM})', 't', bold=True)
     put(ws, r, 3, f"=C{PE_LO}*C{NP26}/{SH_REF}", 'f', PS, bold=True)
     P_LO = r; r += 1
-    put(ws, r, 1, '对应股价上限(元)', 't', bold=True)
+    put(ws, r, 1, f'对应股价上限({PS_DENOM})', 't', bold=True)
     put(ws, r, 3, f"=C{PE_HI}*C{NP26}/{SH_REF}", 'f', PS, bold=True)
     P_HI = r; r += 1
-    put(ws, r, 1, f'以一致预期{F0}E归母{cons_np_v[0]/100:.1f}亿计股价区间(元)', 't')
+    put(ws, r, 1, f'以{CONS_NP_LABEL}{F0}E归母{cons_np_v[0]/100:.1f}亿计股价区间({PS_DENOM})', 't')
     put(ws, r, 3, f"=C{PE_LO}*{ASheet}!$C${A[f'c_np{_cy[0]}']}/{SH_REF}", 'f', PS)
     put(ws, r, 4, f"=C{PE_HI}*{ASheet}!$C${A[f'c_np{_cy[0]}']}/{SH_REF}", 'f', PS)
     put(ws, r, 11, '左=PE下限, 右=PE上限', 'g', size=9)
     P_CONS_LO = r
     r += 1
-    put(ws, r, 1, f'相对现价{_px_val}元空间', 't')   # F1: 现价与Assumptions采用值同源(含price_hkd/fx折算口径)
+    put(ws, r, 1, f'相对现价{_px_val}{PS_DENOM}空间', 't')   # F1: 现价与Assumptions采用值同源(含price_hkd/fx折算口径)
     put(ws, r, 3, f"=C{P_LO}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     put(ws, r, 4, f"=C{P_HI}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     r += 1
@@ -1802,14 +1944,15 @@ def build(cfg, out_path, addr_path, research=None):
         TP_ROW = r
         r += 1
     RVs = 'Relative_Val'
-    REL_MED_PE = f"{RVs}!$F${MED_ROW}" if N_BETA else f"{RVs}!$C${PE_LO}"
+    # 定价中位数只依赖非ref_only计价可比, 与是否配置beta完全解耦。
+    REL_MED_PE = f"{RVs}!$F${MED_ROW}" if PRICE_ROWS else f"{RVs}!$C${PE_LO}"
 
     # ============================================================
     # Sensitivity (矩阵轴公式化自动对中; DPO单维)
     # ============================================================
     ws = wb.create_sheet('Sensitivity')
     title_bar(ws, f'{NAME} — Sensitivity 敏感性分析',
-              '单位: 元/股 | 矩阵轴为公式(自动对中WACC采用值/g), 两矩阵引用DCF页FCFF与Equity_Roll稀释股数; 另附DPO单维敏感性')
+              f'单位: {PER_SHARE_UNIT} | 矩阵轴为公式(自动对中WACC采用值/g), 两矩阵引用DCF页FCFF与Equity_Roll稀释股数; 另附DPO单维敏感性')
     ws.column_dimensions['A'].width = 26
     for col in 'BCDEFG':
         ws.column_dimensions[col].width = 12
@@ -1859,7 +2002,7 @@ def build(cfg, out_path, addr_path, research=None):
             fill = CHK_FILL if _hl and abs(g - _hl.get('growth', -9)) < 1e-9 and pe == _hl.get('pe', -9) else None
             put(ws, r, 3 + i, f, 'f', PS, fill=fill)
         r += 1
-    put(ws, r, 1, cfg.get('sensitivity.matrix2_note', '高亮行≈一致预期增速; 矩阵与DCF独立, 供交叉验证'), 'g', size=9)
+    put(ws, r, 1, cfg.get('sensitivity.matrix2_note', f'高亮行≈{CONS_NP_LABEL}增速; 矩阵与DCF独立, 供交叉验证'), 'g', size=9)
     r += 2
 
     _dpo_deltas = cfg.get('sensitivity.dpo_deltas') or [-40, -20, 0, 20, 40]
@@ -1868,7 +2011,7 @@ def build(cfg, out_path, addr_path, research=None):
     _dpo_path = a5('working_capital.dpo')
     sec(ws, r, '矩阵三: DPO单维敏感性 — 应付天数变动 × DCF每股价值', 9); r += 1
     put(ws, r, 1, 'DPO变动(天) \\ 每股价值', 't', bold=True, align='center')
-    put(ws, r, 3, '每股价值(元)', 't', bold=True, align='center')
+    put(ws, r, 3, f'每股价值({PER_SHARE_UNIT})', 't', bold=True, align='center')
     put(ws, r, 4, 'vs基准', 't', bold=True, align='center')
     put(ws, r, 9, '机制: DPO变动δ→应付变动→ΔNWC变动→FCFF一阶调整; 首年按全额COGS重定价, 以后年按ΔCOGS; '
                   '未反映利息二阶效应(金额小); δ=0格=DCF基准', 'g', size=9, wrap=True)
@@ -1913,12 +2056,12 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, 3, 1, '情景开关当前值', 't', bold=True)
     put(ws, 3, 2, f"={ASheet}!$C${A['sw']}", 'f', '0', bold=True)
     put(ws, 3, 3, '=CHOOSE(B3,"熊市","基准","牛市")', 'f', align='center')
-    put(ws, 3, NOTE_COL, '主模型(IS/BS/CF/FIN/DCF)随开关切换; 本页基准=主模型当前输出, 熊/牛为独立简化演算', 'g', size=9)
+    put(ws, 3, NOTE_COL, '主模型(IS/BS/CF/FIN/DCF)随开关切换; 本页熊/基/牛横向比较全部采用同一简化引擎, 主模型另列桥接', 'g', size=9)
 
     # NWC密度 rho (基准NWC_F0/收入_F0)
     put(ws, 4, 1, '基准NWC/收入密度ρ', 't')
     put(ws, 4, 2, f"={SCH}!{YC[F0]}{S['nwc']}/{ISs}!{YC[F0]}{I['rev']}", 'f', PCT)
-    put(ws, 4, NOTE_COL, '情景页ΔNWC=收入增量×ρ(负密度=现金流来源); 仅熊/牛简化法使用', 'g', size=9)
+    put(ws, 4, NOTE_COL, '情景页ΔNWC=收入增量×ρ(负密度=现金流来源); 熊/基/牛同一简化引擎均使用', 'g', size=9)
     RHO = '$B$4'
 
     scen_rows = {}
@@ -1962,44 +2105,45 @@ def build(cfg, out_path, addr_path, research=None):
             f = (f"={cl}{rows['np']}+{PPEs}!{cl}{P['da']}-({cl}{rows['rev']}-{prev_ref})*{RHO}-{PPEs}!{cl}{P['capex']}")
             put(ws, r, 2 + YRS.index(y), f, 'f', NUM)
         rows['fcff'] = r; r += 1
-        if skey == 'base':
-            put(ws, r, 1, 'DCF每股价值(元) =主模型', 't', bold=True)
-            put(ws, r, 2, f"={DCFs}!D{D['ps']}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, NOTE_COL, '基准直接引用主模型DCF输出(情景开关=2时即基准口径), 不再独立演算', 'g', size=9)
-            rows['ps'] = r; r += 1
-            put(ws, r, 1, '相对估值股价(元) =主模型归母', 't', bold=True)
-            put(ws, r, 2, f"={ISs}!{YC[F0]}{I['np_p']}*{REL_MED_PE}/{SH_REF}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, NOTE_COL, f'=主模型{F0}E归母(IS)×可比中位{F0}E PE/稀释股数', 'g', size=9)
-            rows['rel'] = r; r += 1
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NOTE_COL)
-            put(ws, r, 1, '  桥接说明: 上方基准收入/净利率/FCFF行为简化法演算(供与熊/牛同口径对比), 其估值行已被主模型输出替代; '
-                          '简化法与主模型的差异主要来自: ①财务费用(主模型=FIN平均余额计息, 简化法=固定费用率) ②ΔNWC(主模型=逐项天数驱动, 简化法=密度ρ近似) ③折旧/资本开支口径一致',
-                'g', size=9, wrap=True)
-            ws.row_dimensions[r].height = 30
-            r += 1
-        else:
-            put(ws, r, 1, 'DCF每股价值(元, 简化法)', 't', bold=True)
-            fcff = rows['fcff']
-            terms = '+'.join(f"{YC[y]}{fcff}/(1+{WACC_REF})^{0.5 + j}" for j, y in enumerate(FCST))
-            f = (f"=({terms}"
-                 f"+{YC[F1]}{fcff}*(1+{TG_REF})/({WACC_REF}-{TG_REF})/(1+{WACC_REF})^{NF-0.5}"
-                 f"+DCF!$D${D['netadj']})/{SH_REF}")
-            put(ws, r, 2, f, 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, NOTE_COL, '简化净利率法+年中折现; WACC/g/净现金调整与DCF页一致; 与主模型差异见基准块桥接说明', 'g', size=9)
-            rows['ps'] = r; r += 1
-            put(ws, r, 1, '相对估值股价(元)', 't', bold=True)
-            put(ws, r, 2, f"={YC[F0]}{rows['np']}*{REL_MED_PE}/{SH_REF}", 'f', PS, bold=True, fill=CHK_FILL)
-            put(ws, r, NOTE_COL, f'=情景{F0}E归母×可比中位{F0}E PE/稀释股数', 'g', size=9)
-            rows['rel'] = r; r += 1
+        put(ws, r, 1, f'DCF每股价值({PER_SHARE_UNIT}, 简化法)', 't', bold=True)
+        fcff = rows['fcff']
+        terms = '+'.join(f"{YC[y]}{fcff}/(1+{WACC_REF})^{0.5 + j}" for j, y in enumerate(FCST))
+        f = (f"=({terms}"
+             f"+{YC[F1]}{fcff}*(1+{TG_REF})/({WACC_REF}-{TG_REF})/(1+{WACC_REF})^{NF-0.5}"
+             f"+DCF!$D${D['netadj']})/{SH_REF}")
+        put(ws, r, 2, f, 'f', PS, bold=True, fill=CHK_FILL)
+        put(ws, r, NOTE_COL, '简化净利率法+年中折现; 熊/基/牛均使用相同FCFF、WACC/g及净现金桥口径', 'g', size=9)
+        rows['ps'] = r; r += 1
+        put(ws, r, 1, f'相对估值股价({PER_SHARE_UNIT})', 't', bold=True)
+        put(ws, r, 2, f"={YC[F0]}{rows['np']}*{REL_MED_PE}/{SH_REF}", 'f', PS, bold=True, fill=CHK_FILL)
+        put(ws, r, NOTE_COL, f'=情景{F0}E归母×计价可比中位{F0}E PE/稀释股数', 'g', size=9)
+        rows['rel'] = r; r += 1
         scen_rows[skey] = rows
         r += 1
+
+    sec(ws, r, '主模型桥接 (不参与熊/基/牛同引擎横向替代)'); r += 1
+    put(ws, r, 1, f'主模型当前DCF ({PER_SHARE_UNIT})', 't', bold=True)
+    put(ws, r, 2, f"={DCFs}!D{D['ps']}", 'f', PS, bold=True, fill=CHK_FILL)
+    put(ws, r, NOTE_COL, '完整三表/FIN/FCFF主模型输出; 当前情景由Assumptions开关决定', 'g', size=9)
+    SCEN_MAIN_PS_ROW = r; r += 1
+    put(ws, r, 1, f'同引擎基准DCF ({PER_SHARE_UNIT})', 't')
+    put(ws, r, 2, f"=B{scen_rows['base']['ps']}", 'f', PS)
+    SCEN_BRIDGE_BASE_ROW = r; r += 1
+    put(ws, r, 1, '主模型/同引擎基准 比值', 't', bold=True)
+    put(ws, r, 2, f'=B{SCEN_MAIN_PS_ROW}/B{scen_rows["base"]["ps"]}', 'f', PCT, bold=True)
+    put(ws, r, NOTE_COL, '桥接差异来自FIN计息、逐项营运资本与完整税务口径; 不覆盖三情景简化法基准', 'g', size=9)
+    SCEN_BRIDGE_RATIO_ROW = r; r += 1
+    put(ws, r, 1, '主模型/同引擎基准 控制状态', 't')
+    put(ws, r, 2, f'=IF(ABS(B{SCEN_BRIDGE_RATIO_ROW}-1)>=0.3,"警告: 桥接差异≥30%, 复核简化假设","通过: 桥接差异<30%")',
+        'f', bold=True, fill=CHK_FILL)
+    SCEN_BRIDGE_STATUS_ROW = r; r += 2
     # 汇总对比
     sec(ws, r, '三情景汇总'); r += 1
     put(ws, r, 1, '指标', 't', bold=True)
     for i, t in enumerate(['熊市', '基准', '牛市', '现价', '熊vs现价', '基vs现价', '牛vs现价']):
         put(ws, r, 2 + i, t, 't', bold=True, align='center')
     r += 1
-    put(ws, r, 1, 'DCF每股价值(元)', 't')
+    put(ws, r, 1, f'DCF每股价值({PER_SHARE_UNIT})', 't')
     for i, k in enumerate(['bear', 'base', 'bull']):
         put(ws, r, 2 + i, f"=B{scen_rows[k]['ps']}", 'f', PS, bold=True)
     put(ws, r, 5, f"={ASheet}!$C${A['px']}", 'f', PS)
@@ -2007,7 +2151,7 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 6 + i, f"=B{scen_rows[k]['ps']}/{ASheet}!$C${A['px']}-1", 'f', PCT)
     SUM_PS = r
     r += 1
-    put(ws, r, 1, '相对估值股价(元)', 't')
+    put(ws, r, 1, f'相对估值股价({PER_SHARE_UNIT})', 't')
     for i, k in enumerate(['bear', 'base', 'bull']):
         put(ws, r, 2 + i, f"=B{scen_rows[k]['rel']}", 'f', PS)
     SUM_REL = r
@@ -2024,12 +2168,12 @@ def build(cfg, out_path, addr_path, research=None):
     _sc_bear = cfg.raw['scenarios']['bear']; _sc_bull = cfg.raw['scenarios']['bull']
     ws = wb.create_sheet('Summary')
     title_bar(ws, f'{NAME} — Summary 估值结论汇总 (Football Field)',
-              '单位: 元/股 | 各方法估值区间与现价对比; DCF基准=主模型当前输出(随情景开关联动), 熊/牛为简化法区间', 8)
+              f'单位: {PER_SHARE_UNIT} | 熊/基/牛均为同一简化情景引擎; 完整主模型单列桥接; 自动外推不纳入经验证包络', 8)
     ws.column_dimensions['A'].width = 34
     for col, w in zip('BCDEFG', [22, 12, 12, 12, 12, 40]):
         ws.column_dimensions[col].width = w
     r = 4
-    hdrs = ['估值方法', '口径', '低(元)', '高(元)', '中点(元)', '中点vs现价', '备注']
+    hdrs = ['估值方法', '口径', f'低({PS_DENOM})', f'高({PS_DENOM})', f'中点({PS_DENOM})', '中点vs现价', '备注']
     for i, h in enumerate(hdrs):
         c = put(ws, r, 1 + i, h, 't', bold=True, align='center')
         c.fill = TOT_FILL
@@ -2037,18 +2181,27 @@ def build(cfg, out_path, addr_path, research=None):
     FF_FIRST = r
     # F5: _pe_lo_v 已在Relative_Val区规整为float标量, 此处直接复用
     _pe_band = f'PE {_pe_lo_v:g}x ~ 可比中位'
+    # 最后一列控制是否进入主估值包络; 自动推导的“consensus”只展示、不混入经验证方法。
     ff_rows = [
-        ('DCF绝对估值 — 基准', '主模型(当前情景)', f"={DCFs}!D{D['ps']}", f"={DCFs}!D{D['ps']}", 'FCFF+Gordon终值, 年中折现, WACC采用值'),
-        ('DCF绝对估值 — 熊市', '简化净利率法', f"={SCENs}!B{scen_rows['bear']['ps']}", f"={SCENs}!B{scen_rows['bear']['ps']}",
-         f"分部增速{_sc_bear['rev_adj']*100:g}pct/净利率{_sc_bear['npm_adj']*100:g}pct"),
-        ('DCF绝对估值 — 牛市', '简化净利率法', f"={SCENs}!B{scen_rows['bull']['ps']}", f"={SCENs}!B{scen_rows['bull']['ps']}",
-         f"分部增速+{_sc_bull['rev_adj']*100:g}pct/净利率+{_sc_bull['npm_adj']*100:g}pct"),
-        (f'相对估值 — 模型{F0}E归母', _pe_band, f"={RVs}!C{P_LO}", f"={RVs}!C{P_HI}", f'模型基准{F0}E归母×目标PE带'),
-        (f'相对估值 — 一致预期{F0}E归母', _pe_band, f"={RVs}!C{P_CONS_LO}", f"={RVs}!D{P_CONS_LO}", f'一致预期{cons_np_v[0]/100:.1f}亿×目标PE带'),
+        ('DCF完整主模型 — 当前开关', '完整三表/FIN', f"={DCFs}!D{D['ps']}", f"={DCFs}!D{D['ps']}",
+         '完整FCFF+Gordon终值; 与简化基准的桥接见Scenarios/Checks', True),
+        ('DCF情景 — 熊市', '同引擎简化法', f"={SCENs}!B{scen_rows['bear']['ps']}", f"={SCENs}!B{scen_rows['bear']['ps']}",
+         f"分部增速{_sc_bear['rev_adj']*100:g}pct/净利率{_sc_bear['npm_adj']*100:g}pct", True),
+        ('DCF情景 — 基准', '同引擎简化法', f"={SCENs}!B{scen_rows['base']['ps']}", f"={SCENs}!B{scen_rows['base']['ps']}",
+         '与熊/牛完全相同的简化收入、净利率、FCFF及折现引擎', True),
+        ('DCF情景 — 牛市', '同引擎简化法', f"={SCENs}!B{scen_rows['bull']['ps']}", f"={SCENs}!B{scen_rows['bull']['ps']}",
+         f"分部增速+{_sc_bull['rev_adj']*100:g}pct/净利率+{_sc_bull['npm_adj']*100:g}pct", True),
+        (f'相对估值 — 模型{F0}E归母', _pe_band, f"={RVs}!C{P_LO}", f"={RVs}!C{P_HI}",
+         f'模型基准{F0}E归母×目标PE带', True),
+        (f'相对估值 — {CONS_NP_LABEL}{F0}E归母', _pe_band, f"={RVs}!C{P_CONS_LO}", f"={RVs}!D{P_CONS_LO}",
+         (f'{CONS_NP_LABEL}{cons_np_v[0]/100:.1f}亿×目标PE带; '
+          + ('已验证来源, 纳入包络' if CONS_NP_VERIFIED else '自动推导, 仅展示不纳入包络')), CONS_NP_VERIFIED),
         ('FCFE股权现金流 — 基准', 'Ke折现(股权口径)', f"={FCFEs}!D{E['ps']}", f"={FCFEs}!D{E['ps']}",
-         'FCFE=归母+D&A-ΔNWC-Capex+净新增借款(FIN调度), 与FCFF双视图对照'),
+         'FCFE=归母+D&A-ΔNWC-Capex+净新增借款; 差异≥30%触发下方控制警报', True),
     ]
-    for name, basis, flo, fhi, note in ff_rows:
+    ff_output_rows = []
+    for name, basis, flo, fhi, note, include_envelope in ff_rows:
+        ff_output_rows.append((r, include_envelope))
         put(ws, r, 1, name, 't', bold=True)
         put(ws, r, 2, basis, 'g', align='center', size=9)
         put(ws, r, 3, flo, 'f', PS)
@@ -2063,12 +2216,13 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 5, f"={ASheet}!$C${A['px']}", 'f', PS)
     PX_ROW = r
     r += 1
-    put(ws, r, 1, '综合参考区间(全方法包络)', 't', bold=True)
-    put(ws, r, 3, f"=MIN(C{FF_FIRST}:C{FF_FIRST+len(ff_rows)-1})", 'f', PS, bold=True, fill=CHK_FILL)
-    put(ws, r, 4, f"=MAX(D{FF_FIRST}:D{FF_FIRST+len(ff_rows)-1})", 'f', PS, bold=True, fill=CHK_FILL)
+    put(ws, r, 1, '综合参考区间(经验证方法包络)', 't', bold=True)
+    _eligible_rows = [rr for rr, include in ff_output_rows if include]
+    put(ws, r, 3, '=MIN(' + ','.join(f'C{rr}' for rr in _eligible_rows) + ')', 'f', PS, bold=True, fill=CHK_FILL)
+    put(ws, r, 4, '=MAX(' + ','.join(f'D{rr}' for rr in _eligible_rows) + ')', 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 5, f"=(C{r}+D{r})/2", 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 6, f"=E{r}/{ASheet}!$C${A['px']}-1", 'f', PCT, bold=True, fill=CHK_FILL)
-    put(ws, r, 7, '熊简化法DCF下限 ~ 牛简化法/相对估值上限的包络', 'g', size=9)
+    put(ws, r, 7, '仅纳入完整主模型、同引擎情景、模型相对估值、FCFE及已验证外部一致预期; 自动外推排除', 'g', size=9)
     ENV_ROW = r
     r += 2
     # 简易文本条形(football field可视化)
@@ -2076,7 +2230,7 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '方法', 't', bold=True)
     put(ws, r, 2, '区间条(低→高, 括号为现价相对位置)', 't', bold=True)
     r += 1
-    for i, (name, basis, flo, fhi, note) in enumerate(ff_rows):
+    for i, (name, basis, flo, fhi, note, include_envelope) in enumerate(ff_rows):
         rr = FF_FIRST + i
         bar = (f"=REPT(\"▮\",MAX(1,ROUND((D{rr}-C{rr})/10,0)))"
                f"&\"  [\"&TEXT(C{rr},\"0\")&\"—\"&TEXT(D{rr},\"0\")&\"]\"")
@@ -2088,6 +2242,17 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '关键假设提示', 't', bold=True)
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=7)
     put(ws, r, 2, 'WACC采用值与可比beta联动(Assumptions第十节); 三情景主模型切换见Assumptions情景开关; 校验状态见Checks页', 'g', size=9, wrap=True)
+    r += 1
+    put(ws, r, 1, 'FCFE/FCFF差异控制 (阈值30%)', 't', bold=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=7)
+    put(ws, r, 2, fcfe_control_formula(f'{FCFEs}!D{E["diff"]}'),
+        'f', bold=True, fill=CHK_FILL)
+    SUMMARY_FCFE_CONTROL_ROW = r; r += 1
+    put(ws, r, 1, '主模型/同引擎基准桥接控制', 't', bold=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=7)
+    put(ws, r, 2, f'=IF(ABS({SCENs}!B{SCEN_BRIDGE_RATIO_ROW}-1)>=0.3,"警告: 桥接差异≥30%, 复核简化引擎","通过: 桥接差异<30%")',
+        'f', bold=True, fill=CHK_FILL)
+    SUMMARY_BRIDGE_CONTROL_ROW = r
     SUMMARYs = 'Summary'
 
     # ============================================================
@@ -2176,15 +2341,22 @@ def build(cfg, out_path, addr_path, research=None):
     chkcell('12. Named ranges存在性 (审计轨迹, 15个)',
             "=AND(" + ",".join(f'ISNUMBER(INDIRECT("{n}"))' for n in NAMED_RANGES) + ")",
             'WACC采用值/永续g/Ke/Kd/rf/ERP/βu/税率/股利/最低现金/情景开关/稀释股数/DCF&FCFE每股; 任一named range被删则FALSE')
+    SCEN_MONO_CHECK_ROW = r
+    chkcell('13. 三情景同引擎估值单调性',
+            f"=AND({SCENs}!B{scen_rows['bear']['ps']}<={SCENs}!B{scen_rows['base']['ps']},"
+            f"{SCENs}!B{scen_rows['base']['ps']}<={SCENs}!B{scen_rows['bull']['ps']},"
+            f"{SCENs}!B{scen_rows['bear']['rel']}<={SCENs}!B{scen_rows['base']['rel']},"
+            f"{SCENs}!B{scen_rows['base']['rel']}<={SCENs}!B{scen_rows['bull']['rel']})",
+            '配置层已强制熊≤基≤牛调整; 此处确保同一简化引擎的DCF与相对估值输出保持单调')
     r += 1
     put(ws, r, 1, '信息项: 隐含折旧率(折旧/期初固资净值)', 't')
     for y in FCST:
         put(ws, r, 2 + YRS.index(y), f"={PPEs}!{YC[y]}{P['dep_rt']}", 'f', PCT, align='center')
     put(ws, r, NOTE_COL, '信息行: 合理带宽8%-18%', 'g', size=9); r += 1
-    put(ws, r, 1, f'信息项: {F0}E模型收入/一致预期', 't')
+    put(ws, r, 1, f'信息项: {F0}E模型收入/{CONS_REV_LABEL}', 't')
     put(ws, r, 2, f"={ISs}!{YC[F0]}{I['rev']}/{ASheet}!$C${A[f'c_rev{_cy[0]}']}", 'f', PCT)
-    put(ws, r, NOTE_COL, '接近100%即基准贴合一致预期', 'g', size=9); r += 1
-    put(ws, r, 1, f'信息项: {F0}E模型归母/一致预期', 't')
+    put(ws, r, NOTE_COL, f'接近100%即基准贴合{CONS_REV_LABEL}', 'g', size=9); r += 1
+    put(ws, r, 1, f'信息项: {F0}E模型归母/{CONS_NP_LABEL}', 't')
     put(ws, r, 2, f"={ISs}!{YC[F0]}{I['np_p']}/{ASheet}!$C${A[f'c_np{_cy[0]}']}", 'f', PCT); r += 1
     put(ws, r, 1, '信息项: WACC计算值/采用值', 't')
     put(ws, r, 2, f"={ASheet}!C{A['wacc_calc']}", 'f', PCT)
@@ -2193,12 +2365,34 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, '信息项: FCFE/FCFF每股价值比', 't')
     put(ws, r, 2, f"={FCFEs}!D{E['ps']}/{DCFs}!D{D['ps']}", 'f', PCT)
     put(ws, r, 3, f"={FCFEs}!D{E['ps']}", 'f', PS)
-    put(ws, r, NOTE_COL, '左=FCFE/FCFF比值, 右=FCFE每股(元); 两法差异原因见FCFE页底部注记', 'g', size=9); r += 1
+    put(ws, r, NOTE_COL, f'左=FCFE/FCFF比值, 右=FCFE每股({PER_SHARE_UNIT}); 两法差异原因见FCFE页底部注记', 'g', size=9); r += 1
+    put(ws, r, 1, '信息项: FCFE/FCFF差异控制 (阈值30%)', 't')
+    put(ws, r, 2, fcfe_control_formula(f'{FCFEs}!D{E["diff"]}'),
+        'f', bold=True, fill=CHK_FILL)
+    put(ws, r, NOTE_COL, '信息警报, 不加入布尔汇总; 避免把方法论差异误判为机械勾稽失败', 'g', size=9)
+    CHECKS_FCFE_CONTROL_ROW = r; r += 1
+    put(ws, r, 1, '信息项: 完整主模型 / 同引擎基准桥接', 't')
+    put(ws, r, 2, f"={SCENs}!B{SCEN_MAIN_PS_ROW}/{SCENs}!B{SCEN_BRIDGE_BASE_ROW}", 'f', PCT)
+    put(ws, r, 3, f"={SCENs}!B{SCEN_MAIN_PS_ROW}", 'f', PS)
+    put(ws, r, NOTE_COL, f'左=完整/简化基准比值, 右=完整主模型每股({PER_SHARE_UNIT}); 差异说明见Scenarios桥接区', 'g', size=9); r += 1
+    put(ws, r, 1, '信息项: 主模型/同引擎基准控制 (阈值30%)', 't')
+    put(ws, r, 2, f'=IF(ABS({SCENs}!B{SCEN_BRIDGE_RATIO_ROW}-1)>=0.3,"警告: 桥接差异≥30%, 复核简化假设","通过: 桥接差异<30%")',
+        'f', bold=True, fill=CHK_FILL)
+    put(ws, r, NOTE_COL, '信息警报, 不加入布尔汇总', 'g', size=9)
+    CHECKS_BRIDGE_CONTROL_ROW = r; r += 1
+    if INTERIM_STATUS == 'error':
+        put(ws, r, 1, f'⚠ 中报抓取失败: {INTERIM_ERROR}', 'w', bold=True)
+        put(ws, r, 2, 'ERROR', 'w', bold=True, fill=CHK_FILL, align='center')
+        put(ws, r, NOTE_COL, '取数失败不等于not_available(无可用披露); 本行不加入机械布尔汇总, 但交付前必须复核数据时效性',
+            'w', size=9, wrap=True)
+        CHECKS_INTERIM_ERROR_ROW = r; r += 1
+    else:
+        CHECKS_INTERIM_ERROR_ROW = None
     if TP_ROW:
         put(ws, r, 1, '信息项: 一致预期目标价 vs DCF基准', 't')
         put(ws, r, 2, f"={RVs}!C{TP_ROW}", 'f', PS)
         put(ws, r, 3, f"={RVs}!C{TP_ROW}/{DCFs}!D{D['ps']}-1", 'f', PCT)
-        put(ws, r, NOTE_COL, '左=目标价(元), 右=目标价较模型DCF溢价; 来源见Relative_Val目标价行', 'g', size=9); r += 1
+        put(ws, r, NOTE_COL, f'左=目标价({PS_DENOM}), 右=目标价较模型DCF溢价; 来源见Relative_Val目标价行', 'g', size=9); r += 1
     put(ws, r, 1, f'信息项: {F1}E现金 vs 最低现金', 't')
     put(ws, r, 2, f"={BSs}!{YC[F1]}{B['cash']}", 'f', NUM)
     put(ws, r, 3, f"={FINs}!{YC[F1]}{F['mincash']}", 'f', NUM)
@@ -2276,31 +2470,34 @@ def build(cfg, out_path, addr_path, research=None):
     c.font = Font(name=FONT, size=11, color=C_GREY)
     rows_cover = [
         ('模型构建日期', f'{BUILD_DATE} (行情基准日: {VAL_DATE}收盘; FIN调度/WACC做实/年中折现; FIN迭代展开消除循环引用)'),
-        ('经营货币 / 单位', cfg.get('company.currency_note', '人民币 / 百万元 (每股数据为元)')),
+        ('经营货币 / 单位', cfg.get('company.currency_note', f'{CURRENCY_CODE} / 百万元 (每股数据为{PS_DENOM})')),
         ('颜色规范', '蓝色=输入/假设 | 黑色=公式 | 绿色=外部数据/链接 | 红色=警告'),
         ('✓ 迭代展开(无循环引用)', '原循环链(利息=平均债务余额×利率→净利→现金流→sweep→债务余额→利息)已在FIN页表内显式展开4轮(第1轮期初余额计息, 第k轮按(期初+上轮期末)/2×利率重算), 末轮输出供IS/CF/BS引用。全簿无任何循环引用, 无需开启迭代计算; 收敛残差<0.01(见FIN页残差行/Checks第11项), Excel/WPS/LibreOffice重算结果一致'),
         ('', ''),
         ('—— 关键市场数据 ——', ''),
-        ('现价 (元)', f"={ASheet}!C{A['px']}"),
+        (f'现价 ({PS_DENOM})', f"={ASheet}!C{A['px']}"),
         ('总股本 (百万股)', f"={ASheet}!C{A['sh']}"),
         ('总市值 (百万元)', f"={ASheet}!C{A['mcap']}"),
-        (f'一致预期 {F0}E 营收/归母 (百万)', f"=\"营收\"&TEXT({ASheet}!C{A[f'c_rev{_cy[0]}']},\"#,##0\")&\" / 归母\"&TEXT({ASheet}!C{A[f'c_np{_cy[0]}']},\"#,##0\")&\" ({cons_rev['basis']})\""),
+        (f'{CONS_REV_LABEL}/{CONS_NP_LABEL} {F0}E 营收/归母 (百万)', f"=\"营收\"&TEXT({ASheet}!C{A[f'c_rev{_cy[0]}']},\"#,##0\")&\" / 归母\"&TEXT({ASheet}!C{A[f'c_np{_cy[0]}']},\"#,##0\")&\" ({cons_rev['basis']})\""),
         ('', ''),
         ('—— 模型输出 (随情景开关联动) ——', ''),
         ('当前情景', f"={SCENs}!C3"),
         (f'模型{F0}E营收 (百万)', f"={ISs}!{YC[F0]}{I['rev']}"),
         (f'模型{F0}E归母 (百万)', f"={ISs}!{YC[F0]}{I['np_p']}"),
         ('WACC 计算值/采用值', f"=TEXT({ASheet}!C{A['wacc_calc']},\"0.00%\")&\" / \"&TEXT({ASheet}!C{A['wacc']},\"0.00%\")"),
-        ('DCF每股价值-基准 (元)', f"={DCFs}!D{D['ps']}"),
-        ('DCF每股-熊/基/牛 (元)', f"=TEXT({SCENs}!B{scen_rows['bear']['ps']},\"0.00\")&\" / \"&TEXT({SCENs}!B{scen_rows['base']['ps']},\"0.00\")&\" / \"&TEXT({SCENs}!B{scen_rows['bull']['ps']},\"0.00\")"),
-        ('相对估值区间 (元)', f"=TEXT({RVs}!C{P_LO},\"0.00\")&\" ~ \"&TEXT({RVs}!C{P_HI},\"0.00\")"),
-        ('综合参考区间 (元, Summary页)', f"=TEXT({SUMMARYs}!C{ENV_ROW},\"0.00\")&\" ~ \"&TEXT({SUMMARYs}!D{ENV_ROW},\"0.00\")"),
+        (f'DCF每股价值-完整主模型 ({PS_DENOM})', f"={DCFs}!D{D['ps']}"),
+        (f'DCF每股-熊/基/牛同引擎 ({PS_DENOM})', f"=TEXT({SCENs}!B{scen_rows['bear']['ps']},\"0.00\")&\" / \"&TEXT({SCENs}!B{scen_rows['base']['ps']},\"0.00\")&\" / \"&TEXT({SCENs}!B{scen_rows['bull']['ps']},\"0.00\")"),
+        (f'相对估值区间 ({PS_DENOM})', f"=TEXT({RVs}!C{P_LO},\"0.00\")&\" ~ \"&TEXT({RVs}!C{P_HI},\"0.00\")"),
+        (f'综合参考区间 ({PS_DENOM}, Summary页)', f"=TEXT({SUMMARYs}!C{ENV_ROW},\"0.00\")&\" ~ \"&TEXT({SUMMARYs}!D{ENV_ROW},\"0.00\")"),
         ('Checks校验', f"={CHKs}!{SUM_CELL}"),
     ]
     if IS_HK:
         rows_cover.insert(2, ('市场口径 (港股)',
                               '无单日涨跌停限制(A股为±10%/20%, 口径差异不影响模型公式); 财务与估值为财报币种口径(见上行), '
                               '港元现价/总市值按配置fx折算, PE-TTM为港元行情口径仅供对照; 历史三表=东财HKF10(IFRS科目映射, 现金流量表按隐含汇率折算回财报币种)'))
+    if INTERIM_STATUS == 'error':
+        rows_cover.insert(3, (f'⚠ 中报抓取失败: {INTERIM_ERROR}',
+                              '该状态与not_available(确认无可用披露)不同; 当前模型可能缺少最新中期锚点, 交付前须人工复核'))
     r = 5
     for k, v in rows_cover:
         if k.startswith('——'):
@@ -2355,7 +2552,7 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 2, '—— 数据来源 ——', 't', bold=True, size=12); r += 1
     _default_sources = [
         f'历史三表: 东方财富F10 ({HIST[0]}A-{H0}A年报); 分产品结构: 东财F10主营构成/招股书/券商深度报告(以配置"依据"字段为准);',
-        f'一致预期: {cons_rev["basis"]}; 行情与可比: 腾讯行情({VAL_DATE});',
+        f'{CONS_REV_LABEL}: {cons_rev["basis"]}; 行情与可比: 腾讯行情({VAL_DATE});',
         '可比公司βl/D/E: 分析师输入(参考行情终端β区间与各公司最新年报杠杆), 可按终端数据更新.',
     ]
     for n in (_cover.get('sources') or _default_sources):
@@ -2405,16 +2602,22 @@ def build(cfg, out_path, addr_path, research=None):
             csrc = f"{cc['source']}{' ' + cc['date'] if cc['date'] else ''} (--consensus文件)"
             for i, y in enumerate(FCST[:3]):
                 if i < len(cons_rev_v):
-                    trows.append((f'一致预期{y}E营收', f'{cons_rev_v[i]:,.0f}百万', csrc, '中高(卖方一致预期)',
+                    _rev_verified = CONSENSUS_VERIFIED['rev'][y]
+                    trows.append((f'{CONSENSUS_LABELS["rev"][y]}{y}E营收', f'{cons_rev_v[i]:,.0f}百万',
+                                  csrc if _rev_verified else cons_rev['basis'],
+                                  '中高(卖方一致预期)' if _rev_verified else '低(未由文件覆盖)',
                                   ('f', f'="模型 "&TEXT({ISs}!{YC[y]}{I["rev"]},"#,##0")&" 百万, 占一致预期 "'
                                         f'&TEXT({ISs}!{YC[y]}{I["rev"]}/{cons_rev_v[i]},"0.0%")')))
                 if i < len(cons_np_v):
-                    trows.append((f'一致预期{y}E归母', f'{cons_np_v[i]:,.0f}百万', csrc, '中高(卖方一致预期)',
+                    _np_verified = CONSENSUS_VERIFIED['np'][y]
+                    trows.append((f'{CONSENSUS_LABELS["np"][y]}{y}E归母', f'{cons_np_v[i]:,.0f}百万',
+                                  csrc if _np_verified else cons_np['basis'],
+                                  '中高(卖方一致预期)' if _np_verified else '低(未由文件覆盖)',
                                   ('f', f'="模型 "&TEXT({ISs}!{YC[y]}{I["np_p"]},"#,##0")&" 百万, 占一致预期 "'
                                         f'&TEXT({ISs}!{YC[y]}{I["np_p"]}/{cons_np_v[i]},"0.0%")')))
             if cc.get('target_price'):
-                trows.append(('一致预期目标价', f"{float(cc['target_price']):.2f}元", csrc, '中高(卖方一致预期)',
-                              ('f', f'="模型DCF "&TEXT({DCFs}!D{D["ps"]},"0.00")&" 元, 目标价较模型 "'
+                trows.append(('一致预期目标价', f"{float(cc['target_price']):.2f}{PS_DENOM}", csrc, '中高(卖方一致预期)',
+                              ('f', f'="模型DCF "&TEXT({DCFs}!D{D["ps"]},"0.00")&" {PS_DENOM}, 目标价较模型 "'
                                     f'&TEXT({cc["target_price"]}/{DCFs}!D{D["ps"]}-1,"+0.0%;-0.0%")')))
 
         for it in (research.get('announcements') or {}).get('items') or []:
@@ -2447,7 +2650,24 @@ def build(cfg, out_path, addr_path, research=None):
     addr = {
         'meta': {'code': co.get('code'), 'code_full': CODE_FULL, 'name': NAME,
                  'hist_years': HIST, 'fcst_years': FCST, 'valuation_date': VAL_DATE,
-                 'research_sheets': EXTRA_SHEETS},
+                 'research_sheets': EXTRA_SHEETS,
+                 'config_path': getattr(cfg, 'source_path', None),
+                 'config_sha256': getattr(cfg, 'config_sha256', None),
+                 'is_default_config': bool(getattr(cfg, 'is_default_config', False)),
+                 'currency_code': CURRENCY_CODE, 'per_share_unit': PER_SHARE_UNIT,
+                 'historical_plugs': [
+                     {k: plug[k] for k in ('year', 'diff', 'assets', 'ratio')}
+                     for plug in HISTORICAL_PLUGS
+                 ],
+                 'scenario_engine': 'simplified_same_engine_v1',
+                 'consensus_rev_verified': CONSENSUS_VERIFIED['rev'][F0],
+                 'consensus_np_verified': CONS_NP_VERIFIED,
+                 'consensus_verified_by_year': {
+                     key: {str(y): verified for y, verified in by_year.items()}
+                     for key, by_year in CONSENSUS_VERIFIED.items()
+                 },
+                 'fcfe_divergence_waiver': FCFE_DIVERGENCE_WAIVER,
+                 'interim_status': INTERIM_STATUS},
         'dcf_ps': f"DCF!D{D['ps']}", 'dcf_upside': f"DCF!D{D['upside']}",
         'dcf_ev': f"DCF!D{D['ev']}", 'dcf_eq': f"DCF!D{D['eq']}",
         'dcf_tidx': f"DCF!{YC[F0]}{D['t_idx']}",   # E3: 折现年序行首个预测年单元格(verify端读行号)
@@ -2461,10 +2681,17 @@ def build(cfg, out_path, addr_path, research=None):
         'scen_bear_rel': f"Scenarios!B{scen_rows['bear']['rel']}",
         'scen_base_rel': f"Scenarios!B{scen_rows['base']['rel']}",
         'scen_bull_rel': f"Scenarios!B{scen_rows['bull']['rel']}",
+        'scen_main_ps': f"Scenarios!B{SCEN_MAIN_PS_ROW}",
+        'scen_full_simplified_ratio': f"Scenarios!B{SCEN_BRIDGE_RATIO_ROW}",
+        'scen_full_simplified_status': f"Scenarios!B{SCEN_BRIDGE_STATUS_ROW}",
+        'scen_monotonic_check': f"Checks!B{SCEN_MONO_CHECK_ROW}",
         'is_rev': {y: f"IS!{YC[y]}{I['rev']}" for y in YRS},
         'is_np': {y: f"IS!{YC[y]}{I['np_p']}" for y in YRS},
         'rel_lo': f"Relative_Val!C{P_LO}", 'rel_hi': f"Relative_Val!C{P_HI}",
-        'rel_med_pe': REL_MED_PE, 'sens_center': f"Sensitivity!{M1_CENTER}",
+        'rel_med_pe': REL_MED_PE,
+        'relative_price_rows': [f"Relative_Val!F{rr}" for rr in PRICE_ROWS],
+        'rel_median_cell': f"Relative_Val!$F${MED_ROW}",
+        'sens_center': f"Sensitivity!{M1_CENTER}",
         'wacc_calc': f"Assumptions!C{A['wacc_calc']}", 'wacc_used': f"Assumptions!C{A['wacc']}",
         'wacc_ovr': f"Assumptions!C{A['wacc_ovr']}", 'ke': f"Assumptions!C{A['ke']}",
         'beta_u': f"Assumptions!C{A['beta_u']}", 'beta_l': f"Assumptions!C{A['beta']}",
@@ -2483,6 +2710,9 @@ def build(cfg, out_path, addr_path, research=None):
         'fin_resid_inc_row': F['resid_inc'], 'fin_resid_ok_row': F['resid_ok'],
         'fin_iter_resid_rows': [IT[k]['resid'] for k in sorted(IT)],
         'cf_cash1_row': C['cash1'],
+        'fcfe_control': f"FCFE!D{E['control']}",
+        'checks_fcfe_control': f"Checks!B{CHECKS_FCFE_CONTROL_ROW}",
+        'summary_fcfe_control': f"Summary!B{SUMMARY_FCFE_CONTROL_ROW}",
     }
     # X3: 可选键 — 仅interim信息行生成时写入(指向首年预测/中报年化比值单元格, 供人工查阅, verify不依赖)
     if ITM_RATIO_CELL:
@@ -2505,10 +2735,22 @@ def main():
                     help='研究层: 东财业绩预告/快报(系统curl)最新一期要点进研究摘要')
     ap.add_argument('--llm', default='off', choices=['auto', 'claude', 'codex', 'off'],
                     help='研究层: 本机LLM CLI生成研究备忘录 (默认off)')
+    ap.add_argument('--refresh', action='store_true',
+                    help='忽略已存配置，在内存中重新抓取并构建公开数据兜底模型(手工假设不会沿用)')
+    ap.add_argument('--as-of', help='数据截止日 YYYY-MM-DD；拒绝估值日晚于该日的前视配置')
+    ap.add_argument('--stale-after-days', type=int, default=30,
+                    help='估值日距as-of超过该天数时告警(默认30)')
+    ap.add_argument('--fail-on-stale', action='store_true', help='把配置过期告警升级为硬失败')
+    ap.add_argument('--require-interim', action='store_true',
+                    help='要求存在成功且启用的最新季报/中报锚点，否则硬失败')
     args = ap.parse_args()
     if not args.code and not args.config:
         ap.error('需提供 --code 或 --config')
-    cfg = load_config(code=args.code, config_path=args.config)
+    cfg = load_config(
+        code=args.code, config_path=args.config, refresh=args.refresh, as_of=args.as_of,
+        stale_after_days=args.stale_after_days, fail_on_stale=args.fail_on_stale,
+        require_interim=args.require_interim,
+    )
     research = None
     if args.dr or args.consensus or args.announcements or args.llm != 'off':
         from research import collect_research

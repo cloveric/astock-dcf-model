@@ -6,24 +6,62 @@ on:
   pull_request:
 
 jobs:
-  offline-build:
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pytest 9.0 requires Python >=3.10; exercise floor/current/latest.
+        python-version: ['3.10', '3.12', '3.14']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install deps
+        run: python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Syntax check
+        run: python -m py_compile build_model.py fetch_data.py model_labels.py model_validation.py verify_model.py research/*.py tests/*.py web/*.py
+      - name: Unit tests (offline, pytest)
+        run: python -m pytest -q
+      - name: Ruff correctness and security scan
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m ruff check build_model.py fetch_data.py model_labels.py model_validation.py verify_model.py research web \
+            --select E9,F63,F7,F82,S --ignore S101,S603,S607,S110
+
+  all-config-model-validation:
+    needs: python-tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.11'
-      - name: Install deps
-        run: pip install -r requirements-dev.txt
-      - name: Syntax check
-        run: python -m py_compile build_model.py fetch_data.py verify_model.py research/*.py tests/*.py web/*.py
-      - name: Unit tests (offline, pytest)
-        run: python -m pytest tests/test_units.py -q
-      - name: Build from in-repo fixture config (offline)
-        run: python build_model.py --config configs/300476.yaml --out ci_model.xlsx --addr ci_model.addr.json
-      - name: Smoke check (structure / named ranges / Checks rows)
-        run: python tests/smoke_check.py ci_model.xlsx ci_model.addr.json
-      - name: Idempotency (two builds identical)
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install Python and LibreOffice dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-calc
+      - name: Build, smoke, recalculate, and verify every checked-in config
+        run: |
+          mkdir -p ci-out
+          for cfg in configs/*.yaml; do
+            code="${cfg##*/}"
+            code="${code%.yaml}"
+            xlsx="ci-out/${code}.xlsx"
+            addr="ci-out/${code}.addr.json"
+            python build_model.py --code "$code" --out "$xlsx" --addr "$addr"
+            python tests/smoke_check.py "$xlsx" "$addr"
+            python verify_model.py "$xlsx" --addr "$addr" \
+              --workdir ".cache/lo_${code}" \
+              --json-summary "ci-out/${code}.verify.json"
+          done
+      - name: Idempotency (frozen 300476 baseline)
         run: |
           python build_model.py --config configs/300476.yaml --out ci_a.xlsx --addr ci_a.json
           python build_model.py --config configs/300476.yaml --out ci_b.xlsx --addr ci_b.json
@@ -41,8 +79,3 @@ jobs:
           assert sig('ci_a.xlsx') == sig('ci_b.xlsx'), 'non-deterministic build'
           print('idempotent: OK')
           EOF
-      - name: LibreOffice recalc + full verify + golden assert
-        run: |
-          sudo apt-get update && sudo apt-get install -y libreoffice-calc
-          python verify_model.py ci_model.xlsx --addr ci_model.addr.json --workdir .cache/lo_ci
-          # 300476 黄金值断言(浮点容差 + config指纹门)在 verify_model.py 内自动触发

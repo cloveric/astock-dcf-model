@@ -4,7 +4,6 @@
   "code_full": "00981.HK",
   "name": "中芯国际",
   "hist_years": [
-   2023,
    2024,
    2025
   ],
@@ -16,13 +15,43 @@
    2030
   ],
   "valuation_date": "2026-08-17",
-  "research_sheets": []
+  "research_sheets": [],
+  "config_path": "configs/00981.yaml",
+  "config_sha256": "bffb9adcd2070964d6e86b21521ce72d8912c3349876c9a429217fd0123f180f",
+  "is_default_config": true,
+  "currency_code": "USD",
+  "per_share_unit": "美元/股",
+  "historical_plugs": [
+   {
+    "year": 2024,
+    "diff": -0.10000000000582077,
+    "assets": 49161.2,
+    "ratio": 2.034124472263101e-06
+   }
+    ],
+    "scenario_engine": "simplified_same_engine_v1",
+    "consensus_rev_verified": false,
+    "consensus_np_verified": false,
+    "consensus_verified_by_year": {
+      "rev": {
+        "2026": false,
+        "2027": false,
+        "2028": false
+      },
+      "np": {
+        "2026": false,
+        "2027": false,
+        "2028": false
+      }
+    },
+    "fcfe_divergence_waiver": "已复核：重资产扩产期最低现金储备与滚动续债形成动态杠杆路径，使FCFE较恒定资本结构FCFF高约30.6%；差异保留并分别列示，不作机械配平。",
+  "interim_status": ""
  },
  "dcf_ps": "DCF!D26",
  "dcf_upside": "DCF!D28",
  "dcf_ev": "DCF!D18",
  "dcf_eq": "DCF!D25",
- "dcf_tidx": "DCF!E11",
+ "dcf_tidx": "DCF!D11",
  "fcfe_ps": "FCFE!D20",
  "fcfe_eq": "FCFE!D19",
  "fcfe_fcff_ps": "FCFE!D21",
@@ -45,37 +74,41 @@
   "FCFE_PS": "FCFE!$D$20"
  },
  "bs_chk_row": 47,
- "checks_sum": "Checks!F24",
- "checks_bool": "Checks!F25",
+ "checks_sum": "Checks!F28",
+ "checks_bool": "Checks!F29",
  "scen_bear_ps": "Scenarios!B12",
  "scen_base_ps": "Scenarios!B21",
- "scen_bull_ps": "Scenarios!B31",
+ "scen_bull_ps": "Scenarios!B30",
  "scen_bear_rel": "Scenarios!B13",
  "scen_base_rel": "Scenarios!B22",
- "scen_bull_rel": "Scenarios!B32",
+ "scen_bull_rel": "Scenarios!B31",
+ "scen_main_ps": "Scenarios!B34",
+ "scen_full_simplified_ratio": "Scenarios!B36",
+ "scen_full_simplified_status": "Scenarios!B37",
+ "scen_monotonic_check": "Checks!B16",
  "is_rev": {
-  "2023": "IS!B4",
-  "2024": "IS!C4",
-  "2025": "IS!D4",
-  "2026": "IS!E4",
-  "2027": "IS!F4",
-  "2028": "IS!G4",
-  "2029": "IS!H4",
-  "2030": "IS!I4"
+  "2024": "IS!B4",
+  "2025": "IS!C4",
+  "2026": "IS!D4",
+  "2027": "IS!E4",
+  "2028": "IS!F4",
+  "2029": "IS!G4",
+  "2030": "IS!H4"
  },
  "is_np": {
-  "2023": "IS!B20",
-  "2024": "IS!C20",
-  "2025": "IS!D20",
-  "2026": "IS!E20",
-  "2027": "IS!F20",
-  "2028": "IS!G20",
-  "2029": "IS!H20",
-  "2030": "IS!I20"
+  "2024": "IS!B20",
+  "2025": "IS!C20",
+  "2026": "IS!D20",
+  "2027": "IS!E20",
+  "2028": "IS!F20",
+  "2029": "IS!G20",
+  "2030": "IS!H20"
  },
  "rel_lo": "Relative_Val!C12",
  "rel_hi": "Relative_Val!C13",
  "rel_med_pe": "Relative_Val!$C$9",
+ "relative_price_rows": [],
+ "rel_median_cell": "Relative_Val!$F$5",
  "sens_center": "Sensitivity!E8",
  "wacc_calc": "Assumptions!C81",
  "wacc_used": "Assumptions!C83",
@@ -95,8 +128,8 @@
  "bs_cash_row": 4,
  "bs_tfa_row": 5,
  "eq_shares": "Equity_Roll!C21",
- "summary_env": "Summary!C12",
- "summary_env_hi": "Summary!D12",
+ "summary_env": "Summary!C13",
+ "summary_env_hi": "Summary!D13",
  "dpo_center": "Sensitivity!C27",
  "is_fin_row": 13,
  "fin_finnet_row": 67,
@@ -114,5 +147,8 @@
   118,
   134
  ],
- "cf_cash1_row": 19
+ "cf_cash1_row": 19,
+ "fcfe_control": "FCFE!D23",
+ "checks_fcfe_control": "Checks!B23",
+ "summary_fcfe_control": "Summary!B26"
 }
