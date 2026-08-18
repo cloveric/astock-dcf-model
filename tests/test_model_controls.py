@@ -38,6 +38,28 @@ def _cell_from_ref(wb, ref):
     return wb[sheet][coord]
 
 
+def _mark_reconciled(comp, valuation_date):
+    comp.pop("ref_only", None)
+    comp.update({
+        "earnings_verified": True,
+        "earnings_basis": "FY1",
+        "source_url": "https://example.test/forecast",
+        "source_as_of": valuation_date,
+        "source_forward_pe": comp["mcap"] / comp["np_f0"],
+        "src": "外部一致预期，已与来源 forward PE 对账",
+    })
+
+
+def _raw_with_one_reconciled_comp():
+    raw = _raw("688825")
+    for comp in raw["relative_val"]["comps"]:
+        comp["earnings_verified"] = False
+        comp["ref_only"] = True
+    comp = raw["relative_val"]["comps"][0]
+    _mark_reconciled(comp, raw["model"]["valuation_date"])
+    return raw, comp
+
+
 def test_price_comparables_without_beta_still_drive_true_median(tmp_path):
     raw = _raw()
     raw["wacc"]["beta_unlevered_input"] = 0.9
@@ -46,6 +68,10 @@ def test_price_comparables_without_beta_still_drive_true_median(tmp_path):
         comp.pop("beta_l", None)
         comp.pop("d_e", None)
         comp.pop("tax", None)
+        comp["earnings_verified"] = False
+        comp["ref_only"] = True
+    for comp in raw["relative_val"]["comps"][:2]:
+        _mark_reconciled(comp, raw["model"]["valuation_date"])
 
     wb, addr = _build(tmp_path, raw, "no_beta")
 
@@ -98,7 +124,7 @@ def test_usd_model_uses_usd_per_share_labels_everywhere(tmp_path):
 
 
 def test_auto_consensus_is_labeled_and_excluded_from_summary_envelope(tmp_path):
-    # 0.6.1: 仓库配置的六家可比已升级为已验证FY1一致预期, 会合法进入正式计价;
+    # 仓库配置中已完成结构化对账的FY1可比会合法进入正式计价;
     # 本测试守卫的是"未验证可比不得进正式计价", 故显式将其降级为未验证再断言
     raw = _raw("688825")
     for cp in raw.get("relative_val", {}).get("comps", []):
@@ -116,20 +142,163 @@ def test_auto_consensus_is_labeled_and_excluded_from_summary_envelope(tmp_path):
         and summary.cell(row, 1).value.startswith("相对估值 — 模型自动外推")
     )
     envelope_row = _find_row(summary, "综合参考区间(经验证方法包络)")
+    assert summary.cell(envelope_row, 7).alignment.wrap_text is True
     low_formula = summary.cell(envelope_row, 3).value.replace("$", "")
     high_formula = summary.cell(envelope_row, 4).value.replace("$", "")
     assert f"C{auto_row}" not in low_formula
     assert f"D{auto_row}" not in high_formula
     assert addr["relative_price_rows"] == []
     assert addr["rel_med_pe"] != addr["rel_median_cell"]
+    model_row = _find_row(summary, "相对估值 — 模型2026E归母")
+    assert summary.cell(model_row, 2).value == "PE 5.7x 单点（无正式可比）"
+    assert summary.column_dimensions["B"].width >= 30
 
 
 
-def test_verified_fy1_comps_enter_formal_pricing(tmp_path):
-    """0.6.1: earnings_verified=true + earnings_basis=FY1 的可比应进入正式计价集合"""
-    wb, addr = _build(tmp_path, _raw("688825"), "verified_fy1")
-    assert len(addr["relative_price_rows"]) == 6
+def test_reconciled_fy1_comp_enters_formal_pricing(tmp_path):
+    """Only a source-backed FY1 comp that reconciles to source PE may price."""
+    raw, _ = _raw_with_one_reconciled_comp()
+    wb, addr = _build(tmp_path, raw, "verified_fy1")
+    assert addr["relative_price_rows"] == ["Relative_Val!F5"]
     assert addr["rel_med_pe"] == addr["rel_median_cell"]
+    model_row = _find_row(wb["Summary"], "相对估值 — 模型2026E归母")
+    assert wb["Summary"].cell(model_row, 2).value == "PE 5.7x ~ 可比中位"
+
+
+def test_verified_flag_without_structured_provenance_is_not_a_pricing_gate():
+    """A self-attested boolean must not turn arbitrary numbers into verified data."""
+    comp = {
+        "mcap": 100.0,
+        "np_f0": 10.0,
+        "earnings_verified": True,
+        "earnings_basis": "FY1",
+        "src": "reviewed",
+    }
+    assert bm.forward_earnings_verified(comp) is False
+
+
+def test_legacy_source_text_cannot_bypass_structured_provenance():
+    comp = {
+        "mcap": 100.0,
+        "np_f0": 0.01,
+        "src": "券商一致预期",
+    }
+    assert bm.forward_earnings_verified(comp) is False
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda c: c.pop("source_url"), "source_url"),
+        (lambda c: c.update(source_url="http://127.0.0.1/forecast"), "source_url"),
+        (lambda c: c.update(source_url="https://user:secret@example.com/forecast"), "source_url"),
+        (lambda c: c.update(source_as_of="2026-08-19"), "source_as_of"),
+        (lambda c: c.update(source_as_of="20260818"), "source_as_of"),
+        (lambda c: c.update(source_as_of="2025-01-01"), "source_as_of"),
+        (lambda c: c.update(source_forward_pe=c["source_forward_pe"] * 2), "source_forward_pe"),
+        (lambda c: c.update(np_f0=0.0), "np_f0"),
+        (lambda c: c.update(src="  "), "src"),
+    ],
+)
+def test_verified_comparable_requires_reconciled_structured_provenance(mutate, message):
+    """Malformed or unreconciled peer data must fail before workbook generation."""
+    raw, comp = _raw_with_one_reconciled_comp()
+    mutate(comp)
+    with pytest.raises(ValueError, match=rf"relative_val\.comps\[0\].*{message}"):
+        bm.validate_config(raw)
+
+
+def test_comparable_collection_rejects_non_list_even_when_empty():
+    raw = _raw()
+    raw["relative_val"]["comps"] = {}
+    with pytest.raises(ValueError, match="relative_val.comps must be a list"):
+        bm.validate_config(raw)
+
+
+@pytest.mark.parametrize(("field", "value"), [("np_f0", 0.0), ("np_f1", 0.0), ("np_f1", -1.0)])
+def test_comparable_earnings_used_in_pe_formulas_must_be_positive(field, value):
+    raw = _raw()
+    raw["relative_val"]["comps"][0][field] = value
+    with pytest.raises(ValueError, match=rf"relative_val\.comps\[0\]\.{field} must be positive"):
+        bm.validate_config(raw)
+
+
+def test_missing_fy2_comparable_is_shown_as_unavailable(tmp_path):
+    """A paywalled FY2 estimate must not be duplicated and shown as zero growth."""
+    raw = _raw("688825")
+    for comp in raw["relative_val"]["comps"]:
+        comp["earnings_verified"] = False
+        comp["ref_only"] = True
+        comp["np_f1"] = None
+
+    wb, _ = _build(tmp_path, raw, "missing_fy2")
+
+    for row in range(5, 5 + len(raw["relative_val"]["comps"])):
+        assert [wb["Relative_Val"].cell(row, col).value for col in (7, 8, 9, 10)] == [
+            "—", "—", "—", "—",
+        ]
+
+
+def test_flat_or_negative_fy2_growth_does_not_create_divide_by_zero_peg(tmp_path):
+    raw, comp = _raw_with_one_reconciled_comp()
+    comp["np_f1"] = comp["np_f0"]
+
+    wb, _ = _build(tmp_path, raw, "flat_fy2_growth")
+
+    assert wb["Relative_Val"]["I5"].value == "=G5/E5-1"
+    assert wb["Relative_Val"]["J5"].value == "—"
+    median_row = _find_row(wb["Relative_Val"], "可比中位数(计价1家/β0家)")
+    assert wb["Relative_Val"].cell(median_row, 10).value == "—"
+
+
+def test_688825_only_reconciled_comparables_enter_formal_pricing(tmp_path):
+    """The disclosed outlier remains visible but cannot move the pricing median."""
+    raw = _raw("688825")
+    wb, addr = _build(tmp_path, raw, "688825_reconciled_comps")
+
+    assert addr["relative_price_rows"] == [
+        "Relative_Val!F5",
+        "Relative_Val!F6",
+        "Relative_Val!F7",
+        "Relative_Val!F8",
+        "Relative_Val!F10",
+    ]
+    assert _cell_from_ref(wb, addr["rel_median_cell"]).value == "=MEDIAN(F5,F6,F7,F8,F10)"
+    assert "排除" in wb["Relative_Val"]["K9"].value
+
+
+def test_missing_historical_da_is_shown_as_unavailable(tmp_path):
+    """Missing source D&A must remain visibly unavailable while forecasts still calculate."""
+    raw = _raw("601138")
+    raw["hist"]["cf"]["da"][-1] = None
+
+    wb, _ = _build(tmp_path, raw, "missing_historical_da")
+
+    row = _find_row(wb["CF"], "加: 折旧与摊销(D&A)")
+    assert wb["CF"].cell(row, 4).value == "—"
+    assert isinstance(wb["CF"].cell(row, 5).value, str)
+    assert wb["CF"].cell(row, 5).value.startswith("=")
+
+
+@pytest.mark.parametrize("invalid", [None, "not-a-vector"])
+def test_historical_da_must_be_a_year_aligned_vector(invalid):
+    raw = _raw("601138")
+    raw["hist"]["cf"]["da"] = invalid
+    with pytest.raises(ValueError, match="hist.cf.da must be a vector"):
+        bm.validate_config(raw)
+
+
+def test_addr_metadata_never_publishes_external_absolute_config_path(tmp_path):
+    raw = _raw()
+    cfg = bm.Cfg(raw, source_path=str(tmp_path / "private-config.yaml"))
+    out = tmp_path / "model.xlsx"
+    addr_path = tmp_path / "model.addr.json"
+
+    addr = bm.build(cfg, str(out), str(addr_path))
+
+    assert addr["meta"]["config_path"] == "private-config.yaml"
+    assert addr["meta"]["config_path_scope"] == "external"
+    assert not Path(addr["meta"]["config_path"]).is_absolute()
 
 
 def test_partial_external_consensus_only_verifies_explicit_series_and_year(tmp_path):
@@ -244,7 +413,7 @@ def test_strong_config_validation_rejects_invalid_controls(mutate, message):
         bm.validate_config(raw)
 
 
-@pytest.mark.parametrize("code", ["300476", "002463", "688825", "00981"])
+@pytest.mark.parametrize("code", ["300476", "002463", "688825", "00981", "601138"])
 def test_strong_config_validation_keeps_current_valid_configs(code):
     bm.validate_config(_raw(code))
 

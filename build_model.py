@@ -34,7 +34,9 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -56,6 +58,18 @@ from model_validation import (
 # ============================================================
 # 配置加载与规范化
 # ============================================================
+
+
+def _public_source_reference(path):
+    """Return a portable, non-sensitive config reference and its scope."""
+    if not path:
+        return None, None
+    source = Path(path).resolve()
+    project_root = Path(__file__).resolve().parent
+    try:
+        return source.relative_to(project_root).as_posix(), 'project'
+    except ValueError:
+        return source.name, 'external'
 
 def _norm_entry(e):
     """假设条目规范化 → {'values': [...] 或标量, 'basis': str}
@@ -127,8 +141,11 @@ def _as_date(value, label):
         return value.date()
     if isinstance(value, datetime.date):
         return value
+    rendered = str(value)
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', rendered):
+        raise ValueError(f'配置错误: {label} 必须是 YYYY-MM-DD 日期')
     try:
-        return datetime.date.fromisoformat(str(value))
+        return datetime.date.fromisoformat(rendered)
     except (TypeError, ValueError) as exc:
         raise ValueError(f'配置错误: {label} 必须是 YYYY-MM-DD 日期') from exc
 
@@ -193,13 +210,15 @@ def load_config(code=None, config_path=None, allow_fallback=True, *, refresh=Fal
         with open(config_path, 'rb') as source_file:
             source_hash = hashlib.sha256(source_file.read()).hexdigest()
         raw = load_yaml_strict(config_path)
-        print(f'配置: {config_path}')
+        config_ref, _ = _public_source_reference(config_path)
+        print(f'配置: {config_ref}')
     else:
         if not allow_fallback:
             raise FileNotFoundError(config_path)
         if code is None:
             raise ValueError('配置文件不存在且未提供--code, 无法兜底')
-        print(f'配置文件不存在: {config_path} → 兜底模式(自动拉取{code}公开数据生成)')
+        config_ref, _ = _public_source_reference(config_path)
+        print(f'配置文件不存在: {config_ref} → 兜底模式(自动拉取{code}公开数据生成)')
         from fetch_data import build_fallback_config
         raw = build_fallback_config(code)
         source_hash = None
@@ -215,7 +234,8 @@ def load_config(code=None, config_path=None, allow_fallback=True, *, refresh=Fal
     _enforce_freshness(
         cfg.raw, as_of=as_of, stale_after_days=stale_after_days,
         fail_on_stale=fail_on_stale, require_interim=require_interim,
-        source=cfg.source_path or f'{code or cfg.get("company.code")}公开数据',
+        source=(_public_source_reference(cfg.source_path)[0]
+                if cfg.source_path else f'{code or cfg.get("company.code")}公开数据'),
     )
     validate_config(cfg.raw)
     return cfg
@@ -1397,7 +1417,10 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, label, 't', bold=bold)
         if hist_vals is not None:
             for i, v in enumerate(hist_vals):
-                put(ws, r, 2 + i, v, 'x', NUM, bold=bold)
+                if v is None:
+                    put(ws, r, 2 + i, '—', 'g', align='center')
+                else:
+                    put(ws, r, 2 + i, v, 'x', NUM, bold=bold)
             if fcst_fn is not None:
                 for y in FCST:
                     put(ws, r, 2 + YRS.index(y), fcst_fn(y), 'f', NUM, bold=bold)
@@ -1822,6 +1845,8 @@ def build(cfg, out_path, addr_path, research=None):
     COMP_ROWS = []
     BETA_ROWS = []
     PRICE_ROWS = []
+    F1_ROWS = []
+    PEG_ROWS = []
     _prior_comp_source = ''
     for cp in comps:
         put(ws, r, 1, cp['name'], 't')
@@ -1830,12 +1855,22 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 4, cp['pe_ttm'], 'x', MULT)
         put(ws, r, 5, cp['np_f0'], 'x', NUM)
         put(ws, r, 6, f"=C{r}/E{r}", 'f', MULT)
-        put(ws, r, 7, cp['np_f1'], 'x', NUM)
-        put(ws, r, 8, f"=C{r}/G{r}", 'f', MULT)
-        put(ws, r, 9, f"=G{r}/E{r}-1", 'f', PCT)
-        put(ws, r, 10, f"=F{r}/(I{r}*100)", 'f', '0.00')
+        has_f1 = cp.get('np_f1') is not None
+        has_peg = False
+        if not has_f1:
+            for cc in (7, 8, 9, 10):
+                put(ws, r, cc, '—', 'g', align='center')
+        else:
+            put(ws, r, 7, cp['np_f1'], 'x', NUM)
+            put(ws, r, 8, f"=C{r}/G{r}", 'f', MULT)
+            put(ws, r, 9, f"=G{r}/E{r}-1", 'f', PCT)
+            has_peg = cp['np_f1'] > cp['np_f0']
+            if has_peg:
+                put(ws, r, 10, f"=F{r}/(I{r}*100)", 'f', '0.00')
+            else:
+                put(ws, r, 10, '—', 'g', align='center')
         _cp_source = str(cp.get('src') or '')
-        _pricing_ok = forward_earnings_verified(cp, _prior_comp_source)
+        _pricing_ok = forward_earnings_verified(cp, _prior_comp_source, VAL_DATE)
         _pricing_status = ('定价资格: 已验证FY1/NTM' if _pricing_ok
                            else '定价资格: 排除(未验证远期盈利/仅参照)')
         put(ws, r, 11, (_cp_source + ' | ' if _cp_source else '') + _pricing_status, 'g', size=9, wrap=True)
@@ -1852,6 +1887,10 @@ def build(cfg, out_path, addr_path, research=None):
                 put(ws, r, cc, '—', 'g', align='center')
         if _pricing_ok:
             PRICE_ROWS.append(r)
+            if has_f1:
+                F1_ROWS.append(r)
+            if has_peg:
+                PEG_ROWS.append(r)
         COMP_ROWS.append(r)
         r += 1
     assert r == RV_MED_ROW, f'RV median row mismatch: {r} != {RV_MED_ROW}'
@@ -1868,8 +1907,14 @@ def build(cfg, out_path, addr_path, research=None):
         put(ws, r, 1, f'可比中位数(计价{len(PRICE_ROWS)}家/β{N_BETA}家)', 't', bold=True)
     if PRICE_ROWS:
         put(ws, r, 6, _med('F', PRICE_ROWS), 'f', MULT, bold=True)
-        put(ws, r, 8, _med('H', PRICE_ROWS), 'f', MULT, bold=True)
-        put(ws, r, 10, _med('J', PRICE_ROWS), 'f', '0.00', bold=True)
+    if F1_ROWS:
+        put(ws, r, 8, _med('H', F1_ROWS), 'f', MULT, bold=True)
+    elif COMP_ROWS:
+        put(ws, r, 8, '—', 'g', bold=True, align='center')
+    if PEG_ROWS:
+        put(ws, r, 10, _med('J', PEG_ROWS), 'f', '0.00', bold=True)
+    elif COMP_ROWS:
+        put(ws, r, 10, '—', 'g', bold=True, align='center')
     if N_BETA:
         _b0, _b1 = BETA_ROWS[0], BETA_ROWS[-1]
         c = put(ws, r, 15, f"=MEDIAN(O{_b0}:O{_b1})", 'f', '0.000', bold=True, fill=CHK_FILL)
@@ -2170,7 +2215,7 @@ def build(cfg, out_path, addr_path, research=None):
     title_bar(ws, f'{NAME} — Summary 估值结论汇总 (Football Field)',
               f'单位: {PER_SHARE_UNIT} | 熊/基/牛均为同一简化情景引擎; 完整主模型单列桥接; 自动外推不纳入经验证包络', 8)
     ws.column_dimensions['A'].width = 34
-    for col, w in zip('BCDEFG', [22, 12, 12, 12, 12, 40]):
+    for col, w in zip('BCDEFG', [30, 12, 12, 12, 12, 40]):
         ws.column_dimensions[col].width = w
     r = 4
     hdrs = ['估值方法', '口径', f'低({PS_DENOM})', f'高({PS_DENOM})', f'中点({PS_DENOM})', '中点vs现价', '备注']
@@ -2180,7 +2225,12 @@ def build(cfg, out_path, addr_path, research=None):
     r += 1
     FF_FIRST = r
     # F5: _pe_lo_v 已在Relative_Val区规整为float标量, 此处直接复用
-    _pe_band = f'PE {_pe_lo_v:g}x ~ 可比中位'
+    if PRICE_ROWS:
+        _pe_band = f'PE {_pe_lo_v:g}x ~ 可比中位'
+        _pe_note = '目标PE带'
+    else:
+        _pe_band = f'PE {_pe_lo_v:g}x 单点（无正式可比）'
+        _pe_note = '目标PE单点'
     # 最后一列控制是否进入主估值包络; 自动推导的“consensus”只展示、不混入经验证方法。
     ff_rows = [
         ('DCF完整主模型 — 当前开关', '完整三表/FIN', f"={DCFs}!D{D['ps']}", f"={DCFs}!D{D['ps']}",
@@ -2192,9 +2242,9 @@ def build(cfg, out_path, addr_path, research=None):
         ('DCF情景 — 牛市', '同引擎简化法', f"={SCENs}!B{scen_rows['bull']['ps']}", f"={SCENs}!B{scen_rows['bull']['ps']}",
          f"分部增速+{_sc_bull['rev_adj']*100:g}pct/净利率+{_sc_bull['npm_adj']*100:g}pct", True),
         (f'相对估值 — 模型{F0}E归母', _pe_band, f"={RVs}!C{P_LO}", f"={RVs}!C{P_HI}",
-         f'模型基准{F0}E归母×目标PE带', True),
+         f'模型基准{F0}E归母×{_pe_note}', True),
         (f'相对估值 — {CONS_NP_LABEL}{F0}E归母', _pe_band, f"={RVs}!C{P_CONS_LO}", f"={RVs}!D{P_CONS_LO}",
-         (f'{CONS_NP_LABEL}{cons_np_v[0]/100:.1f}亿×目标PE带; '
+         (f'{CONS_NP_LABEL}{cons_np_v[0]/100:.1f}亿×{_pe_note}; '
           + ('已验证来源, 纳入包络' if CONS_NP_VERIFIED else '自动推导, 仅展示不纳入包络')), CONS_NP_VERIFIED),
         ('FCFE股权现金流 — 基准', 'Ke折现(股权口径)', f"={FCFEs}!D{E['ps']}", f"={FCFEs}!D{E['ps']}",
          'FCFE=归母+D&A-ΔNWC-Capex+净新增借款; 差异≥30%触发下方控制警报', True),
@@ -2222,7 +2272,8 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 4, '=MAX(' + ','.join(f'D{rr}' for rr in _eligible_rows) + ')', 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 5, f"=(C{r}+D{r})/2", 'f', PS, bold=True, fill=CHK_FILL)
     put(ws, r, 6, f"=E{r}/{ASheet}!$C${A['px']}-1", 'f', PCT, bold=True, fill=CHK_FILL)
-    put(ws, r, 7, '仅纳入完整主模型、同引擎情景、模型相对估值、FCFE及已验证外部一致预期; 自动外推排除', 'g', size=9)
+    put(ws, r, 7, '仅纳入完整主模型、同引擎情景、模型相对估值、FCFE及已验证外部一致预期; 自动外推排除',
+        'g', size=9, wrap=True)
     ENV_ROW = r
     r += 2
     # 简易文本条形(football field可视化)
@@ -2645,13 +2696,15 @@ def build(cfg, out_path, addr_path, research=None):
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     wb.save(out_path)
-    print('SAVED', out_path)
+    print('SAVED', _public_source_reference(out_path)[0])
 
+    _config_ref, _config_scope = _public_source_reference(getattr(cfg, 'source_path', None))
     addr = {
         'meta': {'code': co.get('code'), 'code_full': CODE_FULL, 'name': NAME,
                  'hist_years': HIST, 'fcst_years': FCST, 'valuation_date': VAL_DATE,
                  'research_sheets': EXTRA_SHEETS,
-                 'config_path': getattr(cfg, 'source_path', None),
+                 'config_path': _config_ref,
+                 'config_path_scope': _config_scope,
                  'config_sha256': getattr(cfg, 'config_sha256', None),
                  'is_default_config': bool(getattr(cfg, 'is_default_config', False)),
                  'currency_code': CURRENCY_CODE, 'per_share_unit': PER_SHARE_UNIT,
@@ -2691,6 +2744,10 @@ def build(cfg, out_path, addr_path, research=None):
         'rel_med_pe': REL_MED_PE,
         'relative_price_rows': [f"Relative_Val!F{rr}" for rr in PRICE_ROWS],
         'rel_median_cell': f"Relative_Val!$F${MED_ROW}",
+        'relative_f1_rows': [f"Relative_Val!H{rr}" for rr in F1_ROWS],
+        'rel_f1_median_cell': f"Relative_Val!$H${MED_ROW}",
+        'relative_peg_rows': [f"Relative_Val!J{rr}" for rr in PEG_ROWS],
+        'rel_peg_median_cell': f"Relative_Val!$J${MED_ROW}",
         'sens_center': f"Sensitivity!{M1_CENTER}",
         'wacc_calc': f"Assumptions!C{A['wacc_calc']}", 'wacc_used': f"Assumptions!C{A['wacc']}",
         'wacc_ovr': f"Assumptions!C{A['wacc_ovr']}", 'ke': f"Assumptions!C{A['ke']}",
@@ -2719,7 +2776,7 @@ def build(cfg, out_path, addr_path, research=None):
         addr['chk_interim_ratio'] = f"Checks!{ITM_RATIO_CELL}"
     with open(addr_path, 'w', encoding='utf-8') as f:
         json.dump(addr, f, ensure_ascii=False, indent=1)
-    print('ADDR', addr_path)
+    print('ADDR', _public_source_reference(addr_path)[0])
     return addr
 
 

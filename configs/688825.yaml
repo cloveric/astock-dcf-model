@@ -605,21 +605,27 @@ hist:
     cip: 31789.6
 relative_val:
   target_pe_lo:
-    value: 5.8
-    basis: '海外存储三家FY2026一致预期PE中位≈5.8x(美光13.3/海力士4.6/三星5.8, S&P Global via stockanalysis 2026-08-18)作区间下界; 上界=六家计价可比FY1中位'
+    value: 5.7
+    basis: '海外存储三家FY2026市值/一致预期净利PE中位≈5.7x(美光13.3/海力士4.6/三星5.7, 均与来源Forward PE偏差<15%)作区间下界; 上界=五家通过对账的计价可比FY1中位'
   comps:
-    - {name: "美光科技", code: "MU US", mcap: 78650.0, pe_ttm: 21.9, np_f0: 5910.0, np_f1: 5910.0, earnings_verified: true, earnings_basis: FY1,
-       src: "美股DRAM/NAND直接对标; FY2026(财年止2026-08)一致预期净利$82.66B(39家, S&P Global via stockanalysis.com/stocks/mu/forecast 2026-08-18)×USDCNY7.15=5,910亿; 市值$1.10T同源同日折算; PE-TTM 21.93(stockanalysis statistics); FY2027一致预期源页付费墙未取, F0+1列暂按FY1同值展示"}
-    - {name: "SK海力士", code: "000660 KS", mcap: 60647.0, pe_ttm: 17.5, np_f0: 13287.0, np_f1: 13287.0, earnings_verified: true, earnings_basis: FY1,
-       src: "韩股DRAM/HBM直接对标; FY2026一致预期净利₩255.03T(44家, S&P Global via stockanalysis KRX:000660 forecast 2026-08-18)×KRWCNY0.00521=13,287亿; 市值$848.21B(stockanalysis 2026-08-14)×7.15; PE-TTM 17.5(companiesmarketcap 2026-08); FY2027源页付费墙未取, 同值展示"}
-    - {name: "三星电子", code: "005930 KS", mcap: 93900.0, pe_ttm: 19.8, np_f0: 16261.0, np_f1: 16261.0, earnings_verified: true, earnings_basis: FY1,
-       src: "综合体(存储为利润主力), 参照口径; FY2026一致预期净利₩312.12T(31家, S&P Global via stockanalysis KRX:005930 forecast 2026-08-18)×0.00521=16,261亿; 市值1802.5万亿韩元(Yahoo 2026-08初)×0.00521; PE-TTM各源15.9-22.9取19.8; FY2027源页付费墙未取, 同值展示"}
-    - {name: "兆易创新", code: "603986.SH", mcap: 3157.6, pe_ttm: 109.84, np_f0: 94.0, np_f1: 94.0, earnings_verified: true, earnings_basis: FY1,
-       src: "A股存储设计(NOR/利基DRAM); FY2026一致预期归母¥9.40B(9家, S&P Global via stockanalysis SHA:603986 forecast 2026-08-18)=94.0亿; 市值/PE-TTM: 腾讯行情2026-08-18; FY2027源页付费墙未取, 同值展示"}
-    - {name: "北京君正", code: "300223.SZ", mcap: 769.9, pe_ttm: 123.91, np_f0: 20.6, np_f1: 20.6, earnings_verified: true, earnings_basis: FY1,
-       src: "A股车规存储设计, 参照口径; FY2026一致预期归母¥2.06B(仅2家覆盖, S&P Global via stockanalysis SHE:300223 forecast 2026-08-18)=20.6亿; 腾讯行情2026-08-18; FY2027源页付费墙未取, 同值展示"}
-    - {name: "澜起科技", code: "688008.SH", mcap: 2748.0, pe_ttm: 107.45, np_f0: 37.1, np_f1: 37.1, earnings_verified: true, earnings_basis: FY1,
-       src: "A股内存接口(受益同周期, 非制造对标); FY2026一致预期归母¥3.71B(11家, S&P Global via stockanalysis SHA:688008 forecast 2026-08-18)=37.1亿; 腾讯行情2026-08-18; FY2027源页付费墙未取, 同值展示"}
+    - {name: "美光科技", code: "MU US", mcap: 78650.0, pe_ttm: 21.9, np_f0: 5908.0, np_f1: null, earnings_verified: true, earnings_basis: FY1,
+       source_url: "https://stockanalysis.com/stocks/mu/forecast/", source_as_of: "2026-08-18", source_forward_pe: 13.79,
+       src: "美股DRAM/NAND直接对标; FY2026(财年止2026-08)一致预期净利$82.63B(39家, S&P Global via stockanalysis, 2026-08-18复核)×USDCNY7.15=5,908亿; 市值$1.10T同源折算; 自算13.31x vs 来源Forward PE 13.79x; FY2027未取得, 留空不平推"}
+    - {name: "SK海力士", code: "000660 KS", mcap: 60647.0, pe_ttm: 17.5, np_f0: 13287.0, np_f1: null, earnings_verified: true, earnings_basis: FY1,
+       source_url: "https://stockanalysis.com/quote/krx/000660/forecast/", source_as_of: "2026-08-18", source_forward_pe: 4.82,
+       src: "韩股DRAM/HBM直接对标; FY2026一致预期净利₩255.03T(44家, S&P Global via stockanalysis, 2026-08-18复核)×KRWCNY0.00521=13,287亿; 市值$848.21B×7.15; 自算4.56x vs 来源Forward PE 4.82x; FY2027未取得, 留空不平推"}
+    - {name: "三星电子", code: "005930 KS", mcap: 93900.0, pe_ttm: 19.8, np_f0: 16431.3, np_f1: null, earnings_verified: true, earnings_basis: FY1,
+       source_url: "https://stockanalysis.com/quote/krx/005930/forecast/", source_as_of: "2026-08-18", source_forward_pe: 5.62,
+       src: "综合体(存储为利润主力), 参照口径; FY2026一致预期净利₩315.38T(32家, S&P Global via stockanalysis, 2026-08-18复核)×KRWCNY0.00521=16,431.3亿; 市值1802.5万亿韩元×0.00521; 自算5.71x vs 来源Forward PE 5.62x; FY2027未取得, 留空不平推"}
+    - {name: "兆易创新", code: "603986.SH", mcap: 3157.6, pe_ttm: 109.84, np_f0: 91.2, np_f1: null, earnings_verified: true, earnings_basis: FY1,
+       source_url: "https://stockanalysis.com/quote/sha/603986/forecast/", source_as_of: "2026-08-18", source_forward_pe: 37.72,
+       src: "A股存储设计(NOR/利基DRAM); FY2026一致预期归母¥9.12B(9家, S&P Global via stockanalysis, 2026-08-18复核)=91.2亿; 市值/PE-TTM为腾讯行情2026-08-18; 自算34.62x vs 来源Forward PE 37.72x; FY2027未取得, 留空不平推"}
+    - {name: "北京君正", code: "300223.SZ", mcap: 769.9, pe_ttm: 123.91, np_f0: 20.6, np_f1: null, earnings_verified: false, earnings_basis: FY1, ref_only: true,
+       source_url: "https://stockanalysis.com/quote/she/300223/forecast/", source_as_of: "2026-08-18", source_forward_pe: 108.70,
+       src: "仅参照, 不参与定价: FY2026一致预期归母¥2.06B(仅2家覆盖)对应市值/净利37.37x, 但来源Forward PE为108.70x, 差异65.6%远超15%门槛; 待核清稀释股数/adjusted EPS口径; FY2027未取得"}
+    - {name: "澜起科技", code: "688008.SH", mcap: 2748.0, pe_ttm: 107.45, np_f0: 37.1, np_f1: null, earnings_verified: true, earnings_basis: FY1,
+       source_url: "https://stockanalysis.com/quote/sha/688008/forecast/", source_as_of: "2026-08-18", source_forward_pe: 74.44,
+       src: "A股内存接口(受益同周期, 非制造对标); FY2026一致预期归母¥3.71B(11家, S&P Global via stockanalysis, 2026-08-18复核)=37.1亿; 市值/PE-TTM为腾讯行情2026-08-18; 自算74.07x vs 来源Forward PE 74.44x; FY2027未取得, 留空不平推"}
 cover:
   subtitle: 长鑫科技 | 自动兜底建模(东财F10+腾讯行情)
 checks:

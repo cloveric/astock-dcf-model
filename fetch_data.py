@@ -52,6 +52,16 @@ _FETCH_MANIFEST_LOCK = threading.Lock()
 _RAW_SNAPSHOT_DIR = None
 
 
+def _public_path_reference(path):
+    """Return a project-relative path or basename for logs and manifests."""
+    resolved = Path(path).resolve()
+    project_root = Path(__file__).resolve().parent
+    try:
+        return resolved.relative_to(project_root).as_posix()
+    except ValueError:
+        return resolved.name
+
+
 def _utc_timestamp():
     """Return an RFC 3339 UTC timestamp for source-lineage records."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -96,7 +106,22 @@ def curl_get(url, referer='https://emweb.securities.eastmoney.com/', timeout=30)
                     raise RuntimeError(f'原始取数快照哈希冲突: {snapshot}')
             except OSError as exc:
                 raise RuntimeError(f'保存原始取数快照失败: {snapshot}: {exc}') from exc
-            record['snapshot'] = str(snapshot)
+            project_root = Path(__file__).resolve().parent
+            try:
+                snapshot_ref = snapshot.relative_to(project_root)
+                snapshot_scope = 'project'
+                snapshot_root_id = 'project'
+            except ValueError:
+                snapshot_ref = Path(snapshot.name)
+                snapshot_scope = 'raw_dir'
+                snapshot_root_id = hashlib.sha256(
+                    str(_RAW_SNAPSHOT_DIR).encode('utf-8')
+                ).hexdigest()[:12]
+            record['snapshot'] = snapshot_ref.as_posix()
+            record['snapshot_scope'] = snapshot_scope
+            record['snapshot_root_id'] = snapshot_root_id
+            record['snapshot_local_only'] = True
+            record['snapshot_committed'] = False
         _FETCH_MANIFEST.append(record)
     return out.stdout
 
@@ -851,6 +876,8 @@ def build_fallback_config_hk(code, raw_dir=None, _manifest_initialized=False):
         'hist': {k: v for k, v in hist.items() if k in ('is', 'bs', 'cf', 'ppe_split')},
         'relative_val': common['relative_val'],
         'data_lineage': {'generated_at_utc': _utc_timestamp(),
+                         'raw_snapshots_committed': False,
+                         'raw_snapshot_mode': ('local_only' if _RAW_SNAPSHOT_DIR else 'disabled'),
                          'requests': get_fetch_manifest(),
                          'interim': {'source': 'eastmoney_hkf10_income',
                                      'status': 'ok' if interim else 'not_available'}},
@@ -869,6 +896,14 @@ def _m(v, nd=1):
 def _g(row, key):
     v = row.get(key)
     return v if isinstance(v, (int, float)) else None
+
+
+def _cashflow_da(row):
+    """Return reported D&A, preserving an unavailable source value as None."""
+    values = [_g(row, key) for key in ('FA_IR_DEPR', 'IA_AMORTIZE', 'LPE_AMORTIZE')]
+    if all(value is None for value in values):
+        return None
+    return sum(value or 0.0 for value in values)
 
 
 def build_hist(code, years, tables=None):
@@ -960,9 +995,8 @@ def build_hist(code, years, tables=None):
         bs_d['mi'].append(_m(b('MINORITY_EQUITY')))
 
         cf_d['np'].append(is_d['np_p'][-1])
-        da = (_g(Cf, 'FA_IR_DEPR') or 0.0) + (_g(Cf, 'IA_AMORTIZE') or 0.0) \
-            + (_g(Cf, 'LPE_AMORTIZE') or 0.0)
-        cf_d['da'].append(_m(da))
+        da = _cashflow_da(Cf)
+        cf_d['da'].append(None if da is None else _m(da))
         cf_d['ocf'].append(_m(_g(Cf, 'NETCASH_OPERATE') or 0.0))
         cf_d['capex'].append(_m(-(_g(Cf, 'CONSTRUCT_LONG_ASSET') or 0.0)))
         cf_d['icf'].append(_m(_g(Cf, 'NETCASH_INVEST') or 0.0))
@@ -1197,6 +1231,8 @@ def build_fallback_config(code, raw_dir=None):
         'hist': hist,
         'relative_val': common['relative_val'],
         'data_lineage': {'generated_at_utc': _utc_timestamp(),
+                         'raw_snapshots_committed': False,
+                         'raw_snapshot_mode': ('local_only' if _RAW_SNAPSHOT_DIR else 'disabled'),
                          'requests': get_fetch_manifest(),
                          'interim': interim_status},
         'cover': {'subtitle': f'{quote["name"]} | 自动兜底建模(东财F10+腾讯行情)'},
@@ -1322,7 +1358,7 @@ def main():
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w', encoding='utf-8') as f:
         f.write(text)
-    print('SAVED', out)
+    print('SAVED', _public_path_reference(out))
     print(json.dumps({'name': cfg['company']['name'], 'price': cfg['market']['price']['value'],
                       'shares_m': cfg['market']['shares']['value'],
                       'segments': [s['name'] for s in cfg['segments']]}, ensure_ascii=False))

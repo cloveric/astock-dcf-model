@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from model_labels import forward_earnings_review
+
 
 BS_ASSET_KEYS = (
     "cash", "tfa", "ar", "pre", "orec", "inv", "oca", "ppe", "rou",
@@ -79,6 +81,24 @@ def _numbers(value: Any, path: str) -> list[float]:
         if not math.isfinite(float(item)):
             raise ValueError(f"配置错误: finite number required at {path}")
     return [float(item.get("value")) if isinstance(item, dict) else float(item) for item in values]
+
+
+def _nullable_numbers(value: Any, path: str) -> list[Optional[float]]:
+    values = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not values:
+        raise ValueError(f"配置错误: {path} must not be empty")
+    normalized: list[Optional[float]] = []
+    for item in values:
+        if item is None:
+            normalized.append(None)
+            continue
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(f"配置错误: {path} must contain finite numbers or null")
+        number = float(item)
+        if not math.isfinite(number):
+            raise ValueError(f"配置错误: finite number required at {path}")
+        normalized.append(number)
+    return normalized
 
 
 def _validate_finite_tree(node: Any, path: str = "config") -> None:
@@ -247,9 +267,13 @@ def validate_config(raw: dict[str, Any]) -> None:
         if not isinstance(node, dict):
             raise ValueError(f"配置错误: missing {section}")
         for key, value in node.items():
-            if isinstance(value, (list, tuple)):
-                if len(value) != nh:
-                    raise ValueError(f"配置错误: {section}.{key} vector length must be exactly {nh}")
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"配置错误: {section}.{key} must be a vector")
+            if len(value) != nh:
+                raise ValueError(f"配置错误: {section}.{key} vector length must be exactly {nh}")
+            if section == "hist.cf" and key == "da":
+                _nullable_numbers(value, f"{section}.{key}")
+            else:
                 _numbers(value, f"{section}.{key}")
 
     segments = _get(raw, "segments")
@@ -324,7 +348,33 @@ def validate_config(raw: dict[str, Any]) -> None:
             _, basis = _entry(segment.get(field))
             if not basis.strip():
                 raise ValueError(f"配置错误: segments[{index}].{field}.basis must be non-empty")
-    comps = _get(raw, "relative_val.comps") or []
+    comps = _get(raw, "relative_val.comps")
+    if comps is None:
+        comps = []
+    if not isinstance(comps, list):
+        raise ValueError("配置错误: relative_val.comps must be a list")
+    valuation_date = _get(raw, "model.valuation_date")
+    for index, comp in enumerate(comps):
+        path = f"relative_val.comps[{index}]"
+        if not isinstance(comp, dict):
+            raise ValueError(f"配置错误: {path} must be a mapping")
+        mcap = _numbers(comp.get("mcap"), f"{path}.mcap")[0]
+        if mcap <= 0:
+            raise ValueError(f"配置错误: {path}.mcap must be positive")
+        _numbers(comp.get("pe_ttm"), f"{path}.pe_ttm")
+        np_f0 = _numbers(comp.get("np_f0"), f"{path}.np_f0")[0]
+        if np_f0 <= 0:
+            raise ValueError(f"配置错误: {path}.np_f0 must be positive")
+        if comp.get("np_f1") is not None:
+            np_f1 = _numbers(comp.get("np_f1"), f"{path}.np_f1")[0]
+            if np_f1 <= 0:
+                raise ValueError(f"配置错误: {path}.np_f1 must be positive")
+        if comp.get("earnings_verified") is True:
+            verified, reason = forward_earnings_review(
+                comp, valuation_date=valuation_date,
+            )
+            if not verified:
+                raise ValueError(f"配置错误: {path} verified earnings invalid: {reason}")
     if not any(comp.get("beta_l") is not None for comp in comps):
         if _get(raw, "wacc.beta_unlevered_input") is None:
             raise ValueError("配置错误: wacc.beta_unlevered_input required without beta comparables")

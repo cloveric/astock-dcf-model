@@ -1,4 +1,4 @@
-# astock-dcf-model 0.6.0 — LibreOffice验收摘要
+# astock-dcf-model 0.6.2 — LibreOffice验收摘要
 生成日: 2026-08-18
 标的: 中芯国际(00981.HK)
 命令: python verify_model.py examples/00981_中芯国际_估值模型.xlsx --addr examples/00981_中芯国际_估值模型.addr.json --no-recalc
@@ -12,6 +12,7 @@ FCFE每股: 2.1195美元/股; FCFE/FCFF差异 +30.6%
 FCFE差异控制: WAIVED; 复核理由见configs/00981.yaml，原始差异保留显示
 同引擎熊/基/牛DCF: 0.27 / 0.65 / 1.01美元/股 (PASS)
 正式相对估值: 1.3198美元/股(25x单点; 无已验证计价可比)
+FY2可比中位: N/A(未配置可比公司)
 币种标签: 美元/股 (PASS)
 
 总体: ALL PASS (verdict=PASS, exit=0)

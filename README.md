@@ -6,10 +6,10 @@
 
 **A 股 + 港股 · DCF/FCFE 双视图 · 全公式生成 · LibreOffice 重算布尔验收**
 
-[![Version](https://img.shields.io/badge/version-0.6.1-1f6feb.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.2-1f6feb.svg)](./CHANGELOG.md)
 [![CI](https://github.com/cloveric/astock-dcf-model/actions/workflows/ci.yml/badge.svg)](https://github.com/cloveric/astock-dcf-model/actions)
 [![Checks](https://img.shields.io/badge/checks-12%2F12%20gating-brightgreen.svg)](#-验证记录)
-[![Tests](https://img.shields.io/badge/tests-92%20passed-brightgreen.svg)](#-验证记录)
+[![Tests](https://img.shields.io/badge/tests-121%20passed-brightgreen.svg)](#-验证记录)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
@@ -46,7 +46,7 @@ python fetch_data.py --code 002463       # 换标的: 拉数生成 configs/00246
 
 ## 📸 它长什么样
 
-**Summary 页 — Football Field 估值结论汇总**(六种口径区间对照现价,一眼看到安全边际):
+**Summary 页 — Football Field 估值结论汇总**(七条估值方法对照现价,一眼看到安全边际):
 
 ![Summary Football Field](docs/img/summary-football-field.png)
 
@@ -110,14 +110,14 @@ flowchart TB
 
 ## ✅ 验证记录
 
-验收口径：从仓库内配置重新构建，LibreOffice headless 重算全簿，再由 `verify_model.py` 读取配套 `addr.json` 并输出结构化 verdict。下表是 2026-08-18 的可复现结果；“模型现价”取自各配置的估值基准日，与表内 DCF/FCFE 及情景结果严格同口径，**不是实时行情**。正式相对估值只纳入有明确 FY1/NTM 盈利依据的可比公司。
+验收口径：从仓库内配置重新构建，LibreOffice headless 重算全簿，再由 `verify_model.py` 读取配套 `addr.json` 并输出结构化 verdict。下表是 2026-08-18 的可复现结果；“模型现价”取自各配置的估值基准日，与表内 DCF/FCFE 及情景结果严格同口径，**不是实时行情**。正式相对估值只纳入具有结构化 FY1/NTM 来源、时点和 PE 对账证据的可比公司。
 
 | 标的 | 模型现价（估值基准日） | 主模型 DCF 每股（相对现价） | FCFE 每股（相对 FCFF） | 正式相对估值 | 同引擎熊/基/牛 DCF | 验收结果 |
 |---|---:|---:|---:|---:|---:|---|
-| 胜宏科技 300476 | **269.33 元**（2026-08-14） | **340.415208186145 元**（+26.4%） | 325.4508 元（−4.4%） | 296.47 ~ 417.23 元 | 131.02 / 350.04 / 569.15 元 | **PASS；黄金值命中** |
-| 沪电股份 002463 | **123.53 元**（2026-08-17） | 112.2842 元（−9.1%） | 108.3978 元（−3.5%） | 82.51 ~ 116.67 元 | 43.62 / 116.87 / 188.00 元 | **PASS** |
+| 胜宏科技 300476 | **269.33 元**（2026-08-14） | **340.415208186145 元**（+26.4%） | 325.4508 元（−4.4%） | 296.47 元（35x 单点；旧文本可比仅参考） | 131.02 / 350.04 / 569.15 元 | **PASS；黄金值命中** |
+| 沪电股份 002463 | **123.53 元**（2026-08-17） | 112.2842 元（−9.1%） | 108.3978 元（−3.5%） | 82.51 元（30x 单点；旧文本可比仅参考） | 43.62 / 116.87 / 188.00 元 | **PASS** |
 | 中芯国际 00981 | **9.6667 美元**（约 75.40 港元÷7.80；2026-08-17） | 1.6233 美元（−83.2%） | 2.1195 美元（+30.6%） | 1.3198 美元（25x 单点） | 0.27 / 0.65 / 1.01 美元 | **PASS；FCFE 差异已复核并明示 WAIVED** |
-| 长鑫科技 688825 | **61.09 元**（2026-08-18） | 7.9540 元（−87.0%） | 2.7984 元（−64.8%） | **4.40 ~ 17.78 元**（FY1 5.8x~23.4x, 六家已验证一致预期） | 0.52 / 4.53 / 8.52 元 | **PASS；FCFE 差异已复核并明示 WAIVED** |
+| 长鑫科技 688825 | **61.09 元**（2026-08-18） | 7.9540 元（−87.0%） | 2.7984 元（−64.8%） | **4.32 ~ 10.10 元**（FY1 5.7x~13.3x；五家对账通过） | 0.52 / 4.53 / 8.52 元 | **PASS；FCFE 差异已复核并明示 WAIVED** |
 | 工业富联 601138 | **66.10 元**（2026-08-18） | 55.2158 元（−16.5%） | 45.5719 元（−17.5%） | 58.14 元（25x 单点, 无可比配置） | 17.41 / 56.24 / 98.20 元 | **PASS** |
 
 <details>
@@ -125,11 +125,13 @@ flowchart TB
 
 `00981` 的 2023 HKF10 资产负债表缺少核心字段，旧版曾把 29,456.4 百万美元（总资产的 61.6%）塞入“其他权益”强行配平。0.6.0 已删除这期不完整历史，只保留可复核的 2024–2025；任何重大差额或重大负残余科目现在都会在构建前 hard fail。
 
-`688825` 的六家可比在 0.6.1 已升级为**已验证 FY2026 一致预期**（S&P Global via stockanalysis, 2026-08-18, 逐家标注 earnings_basis=FY1 与来源/汇率）：美光 13.3x / SK海力士 4.6x / 三星 5.8x / 兆易 33.6x / 君正 37.4x / 澜起 74.1x，六家 FY1 中位 23.4x。正式相对估值区间 4.40~17.78 元——真 forward 口径下现价 61 元高于全部正式区间，此前基于 TTM 占位的 64.4x 中位与“现价落于区间内”的表述作废。601138 已补入 `configs/601138.yaml`（含 2026Q1 锚定），满足“表内行可从仓库配置复现”的验收口径；00981 配置新增 2026Q1 中期段（anchor=false 仅对照展示, Q1 年化/模型 2026E = 0.93）。
+`300476` 与 `002463` 原有可比只在自由文本里写“券商/一致预期”，没有来源 URL、来源时点和来源 Forward PE。0.6.2 取消自由文本正向推断后，这些行仍保留展示并可用于 β，但不再进入正式 PE 中位数；两者正式相对估值因此回落为配置的 35x / 30x 下限单点。补齐结构化证据并通过对账后才会重新进入区间上限。
+
+`688825` 在 0.6.2 对六家 FY2026 可比做了第二次逐项对账：配置必须同时给出来源 URL、来源日期、来源 Forward PE 与 FY1 盈利，且“市值÷FY1 净利”相对来源 PE 的偏差不得超过 15%。美光 13.31x / SK海力士 4.56x / 三星 5.71x / 兆易 34.62x / 澜起 74.07x 共五家通过；北京君正自算 37.37x 与来源 108.70x 相差 65.6%，因此保留为可见参考行但不参与定价。五家正式 FY1 中位为 13.3125x，相对估值区间收窄为 4.32~10.10 元。未取得的 FY2027 数据保持空值并在表内显示“—”，不再复制 FY2026 制造 0% 增长。601138 已补入 `configs/601138.yaml`（含 2026H1 锚定），满足“表内行可从仓库配置复现”的验收口径；00981 配置含 2026Q1 中期段（anchor=false，仅对照展示，Q1 年化/模型 2026E = 0.93）。
 
 FCFE/FCFF 差异达到 30% 会使验证器返回 `REVIEW`（退出码 2）。`00981` 与 `688825` 的配置分别记录了动态杠杆与一次性去杠杆的复核理由，所以显示 `WAIVED`；这不是把两种方法机械配成一致，原始差异仍完整显示。
 
-同一配置双构建的公式/输入签名一致；全套 **92 tests** 已在本轮本地验证通过。CI 已配置为持续执行 Python 语法检查、Ruff、四配置构建/冒烟/LibreOffice 重算/结构化验收。
+同一配置双构建的公式/输入签名一致；全套 **121 tests** 已在本轮本地验证通过。CI 已配置为持续执行 Python 语法检查、Ruff、五配置构建/冒烟/LibreOffice 重算/结构化验收。
 
 </details>
 
@@ -205,7 +207,7 @@ capex_rate: {value: 0.045, basis: "公司指引+近三年均值"}      # 推荐:
 | `scenarios` | bear / base / bull: rev_adj / npm_adj / logic | 情景参数 |
 | `checks` | gm_band / fcfe_divergence_waiver(可选) | 毛利率展示区间；FCFE/FCFF 差异≥30%时仅允许用非空、已复核理由显式豁免 |
 | `hist` | is / bs / cf / ppe_split / notes | 历史三表(百万元),`fetch_data.py` 可自动生成 |
-| `relative_val` | target_pe_lo / comps | 可比公司；`beta_l` 为空者不进 βu 中位数，未验证 forward 盈利者不进正式 PE 中位数 |
+| `relative_val` | target_pe_lo / comps | 可比公司；`beta_l` 为空者不进 βu 中位数；正式计价必须显式 `earnings_verified: true`，并有 FY1/NTM 口径、公开 HTTPS 来源、90 日内来源日期/Forward PE，且自算 PE 与来源偏差≤15% |
 | `sensitivity` | pe_list / np_growth_list / highlight / dpo_deltas | 敏感性矩阵参数(dpo_deltas 缺 0 时自动补) |
 | `references` / `cover` | 文本列表 | 参考信息块与 Cover 注记 |
 
@@ -280,7 +282,7 @@ python verify_model.py --code 00981
 ## 🧾 数据口径
 
 - **东财 F10**(三表/主营构成):一律经系统 curl 子进程抓取(python 不直连东财),单位统一换算为人民币百万元;历史年报年按当前月份自动推导;银行/券商/保险等特殊报表模板显式报错,不产出错误模型;
-- **取数血缘**：每个成功响应记录 URL、UTC 时间、字节数和 SHA-256；`fetch_data.py` 默认保存内容寻址的不可变原始快照到 `data/raw/`，可用 `--raw-dir` 改目录或用 `--no-raw-snapshot` 明确关闭；
+- **取数血缘**：每个成功响应记录 URL、UTC 时间、字节数和 SHA-256；`fetch_data.py` 默认保存内容寻址的不可变原始快照到 `data/raw/`，并标注 `local_only/committed=false`。清单只写仓库相对路径；自定义目录只写文件名、scope 和匿名 root ID，解析时需同时提供原 `--raw-dir`，不会泄露开发机绝对路径。可用 `--no-raw-snapshot` 明确关闭；
 - **东财 HKF10**(港股三表):循环分页拉全,分页中断/核心科目缺失/隐含汇率异常均显式报错,**拒绝静默按 0 建模**;
 - **最新报告期**(0.5.0):兜底生成时自动抓当年最新一期已披露季报/中报(Q1/H1/Q3)及上年同期,写入 `interim` 段并按年化实绩校准首年预测；网络/解析失败与“尚无披露”分别记录。构建支持 `--refresh`、`--as-of`、`--stale-after-days`、`--fail-on-stale` 和 `--require-interim`；
 - **腾讯行情**(qt.gtimg.cn):现价/总市值/PE-TTM;现价为 0(停牌/无行情)时拒绝兜底建模;

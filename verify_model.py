@@ -100,13 +100,22 @@ def _golden_control(code, actual_value, meta, repo_root=None,
     default_path = os.path.join(root, 'configs', f'{code}.yaml')
     config_path = (meta.get('config_path') or meta.get('config_source') or
                    meta.get('source_config'))
+    config_scope = meta.get('config_path_scope')
     fingerprint = (meta.get('config_sha256') or meta.get('config_fingerprint') or
                    meta.get('source_fingerprint'))
     is_default = meta.get('is_default_config')
 
-    if is_default is None and config_path:
-        resolved = os.path.realpath(os.path.abspath(config_path))
-        is_default = resolved == os.path.realpath(default_path)
+    resolved_config_path = None
+    if config_path:
+        if os.path.isabs(config_path):
+            resolved_config_path = os.path.realpath(config_path)  # legacy addr compatibility
+        elif config_scope == 'project':
+            resolved_config_path = os.path.realpath(os.path.join(root, config_path))
+        elif config_scope != 'external':
+            resolved_config_path = os.path.realpath(os.path.abspath(config_path))
+
+    if is_default is None and resolved_config_path:
+        is_default = resolved_config_path == os.path.realpath(default_path)
     if is_default is False:
         return _control_result(
             '黄金值控制', 'NOT_APPLICABLE', '自定义配置不与默认配置黄金值比较',
@@ -124,8 +133,8 @@ def _golden_control(code, actual_value, meta, repo_root=None,
                 observed_sha256=fingerprint or '',
             )
 
-    if config_path and os.path.exists(config_path):
-        source_fingerprint = _sha256_file(config_path)
+    if resolved_config_path and os.path.exists(resolved_config_path):
+        source_fingerprint = _sha256_file(resolved_config_path)
         if fingerprint and fingerprint != source_fingerprint:
             return _control_result(
                 '黄金值控制', 'FAIL',
@@ -209,21 +218,25 @@ def _scenario_control(bear, base, bull, engine=None):
     )
 
 
-def _relative_median_control(median_value, pricing_values):
+def _relative_median_control(
+    median_value,
+    pricing_values,
+    name='相对估值计价中位数',
+):
     if not pricing_values:
-        return _control_result('相对估值计价中位数', 'NOT_APPLICABLE', '无计价可比行')
+        return _control_result(name, 'NOT_APPLICABLE', '无适用可比行')
     values = [_num(v) for v in pricing_values]
     median_n = _num(median_value)
     if median_n is None or any(v is None for v in values):
         return _control_result(
-            '相对估值计价中位数', 'FAIL',
+            name, 'FAIL',
             f'中位数或计价行含非数值: median={median_value!r}, rows={pricing_values!r}',
         )
     expected = float(statistics.median(values))
     tolerance = max(1e-9, abs(expected) * 1e-9)
     passed = abs(median_n - expected) <= tolerance
     return _control_result(
-        '相对估值计价中位数', 'PASS' if passed else 'FAIL',
+        name, 'PASS' if passed else 'FAIL',
         f'addr中位数={median_n:.6g}, 计价行中位数={expected:.6g}',
         actual=median_n, expected=expected, pricing_rows=len(values),
     )
@@ -338,7 +351,7 @@ def _verification_payload(path, meta, controls):
     summary = _summarize_controls(controls)
     return {
         'schema_version': 1,
-        'file': path,
+        'file': os.path.basename(os.fspath(path)),
         'model': dict(meta or {}),
         'verdict': summary['verdict'],
         'exit_code': summary['exit_code'],
@@ -478,7 +491,7 @@ def main():
         return {k: _num(v) for k, v in kv.items()}
 
     print('=' * 70)
-    print(f"文件: {recalced}")
+    print(f"文件: {os.path.basename(recalced)}")
     print(f"标的: {meta.get('name')}({meta.get('code_full')})  基准日: {meta.get('valuation_date')}")
     print('=' * 70)
 
@@ -614,6 +627,13 @@ def main():
     pricing_values = ([_value_at_ref(WB, ref) for ref in pricing_refs]
                       if pricing_refs is not None else [])
     record(_relative_median_control(medpe, pricing_values))
+    if 'relative_f1_rows' in addr:
+        f1_refs = addr.get('relative_f1_rows') or []
+        f1_values = [_value_at_ref(WB, ref) for ref in f1_refs]
+        f1_median = _value_at_ref(WB, addr.get('rel_f1_median_cell'))
+        record(_relative_median_control(
+            f1_median, f1_values, name='相对估值FY2中位数',
+        ))
     print(f"\n相对估值区间=[{fmtv(lo, '.2f')}, {fmtv(hi, '.2f')}]{per_share_unit}  "
           f"可比中位PE={medpe if not isinstance(medpe, float) else round(medpe, 1)}")
 

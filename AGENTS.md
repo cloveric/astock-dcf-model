@@ -27,7 +27,7 @@ A 股机构级 DCF 估值模型生成器。`build_model.py --code <6位代码>` 
 - `verify_model.py` — LibreOffice 重算验收(依赖 addr.json 寻址)。
 - `research/` — 研究层: dr_report(档案解析与依据回填) / consensus(一致预期文件) / announcements(东财公告) / llm(本机CLI备忘录) / sheets(两个研究页)。
 - `web/` — Web 模式: `server.py`(FastAPI, Bearer token、活跃队列/请求体上限、结构化验收状态、默认仅 verified 可下载) + `static/index.html`(零构建单页)。非回环绑定必须设置 `WEB_API_TOKEN`，Web LLM 默认关闭。
-- `configs/` — 个股配置(300476=完整手工范例, 002463=全自动范例, 00981=港股HKF10范例, 688825=中期锚定/拐点范例)。
+- `configs/` — 个股配置(300476=完整手工范例, 002463=全自动范例, 00981=港股HKF10范例, 688825=中期锚定/拐点范例, 601138=自动取数持久化范例)。
 - `examples/` — 成稿 xlsx + 验收日志 + research fixture; `tests/smoke_check.py` 离线冒烟, `tests/test_units.py` pytest离线单测。
 - `requirements.txt`(核心) / `requirements-web.txt`(+Web) / `requirements-dev.txt`(+pytest/Ruff) 分层；CI/Docker 使用带哈希的 `requirements-*.lock`。
 - `Dockerfile` / `.dockerignore` — 一体化镜像(Web 服务 + LibreOffice 验收 + curl 数据层)。

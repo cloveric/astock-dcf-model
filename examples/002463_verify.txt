@@ -1,4 +1,4 @@
-# astock-dcf-model 0.6.0 — LibreOffice验收摘要
+# astock-dcf-model 0.6.2 — LibreOffice验收摘要
 生成日: 2026-08-18
 标的: 沪电股份(002463.SZ)
 命令: python verify_model.py examples/002463_沪电股份_估值模型.xlsx --addr examples/002463_沪电股份_估值模型.addr.json --no-recalc
@@ -10,7 +10,8 @@ WACC/g: 7.5637% / 3.0000%; spread 4.56% (PASS)
 DCF每股: 112.2842元/股
 FCFE每股: 108.3978元/股; FCFE/FCFF差异 -3.5% (PASS)
 同引擎熊/基/牛DCF: 43.62 / 116.87 / 188.00元/股 (PASS)
-正式相对估值: 82.51 ~ 116.67元/股; 计价可比中位PE 42.4241x (PASS)
+正式相对估值: 82.51元/股(30x单点; 旧文本可比仅参考); 无结构化对账计价可比
+FY2可比中位: N/A(未取得结构化FY2盈利)
 币种标签: 元/股 (PASS)
 
 总体: ALL PASS (verdict=PASS, exit=0)

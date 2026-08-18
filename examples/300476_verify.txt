@@ -1,4 +1,4 @@
-# astock-dcf-model 0.6.0 — LibreOffice验收摘要
+# astock-dcf-model 0.6.2 — LibreOffice验收摘要
 生成日: 2026-08-18
 标的: 胜宏科技(300476.SZ)
 命令: python verify_model.py examples/300476_胜宏科技_估值模型.xlsx --addr examples/300476_胜宏科技_估值模型.addr.json --no-recalc
@@ -11,7 +11,8 @@ DCF每股: 340.415208186145元/股
 黄金值: 340.415208186145元/股 (PASS)
 FCFE每股: 325.4508元/股; FCFE/FCFF差异 -4.4% (PASS)
 同引擎熊/基/牛DCF: 131.02 / 350.04 / 569.15元/股 (PASS)
-正式相对估值: 296.47 ~ 417.23元/股; 计价可比中位PE 49.2572x (PASS)
+正式相对估值: 296.47元/股(35x单点; 旧文本可比仅参考); 无结构化对账计价可比
+FY2可比中位: N/A(未取得结构化FY2盈利)
 币种标签: 元/股 (PASS)
 
 总体: ALL PASS (verdict=PASS, exit=0)

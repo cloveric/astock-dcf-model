@@ -529,7 +529,7 @@ hist:
     da:
     - 4449.5
     - 5050.6
-    - 0.0
+    - null
     ocf:
     - 43083.7
     - 23819.9
@@ -560,37 +560,33 @@ relative_val:
   comps: []
 data_lineage:
   generated_at_utc: '2026-08-18T04:44:03.081744Z'
+  raw_snapshots_committed: false
+  raw_snapshot_mode: local_only
   requests:
   - url: https://qt.gtimg.cn/q=sh601138
     fetched_at: '2026-08-18T04:44:02.950781Z'
     bytes: 508
     sha256: 612a3ff26d072aefa15c6914f54c3d4c17c2e22a7e22eed6b22f77acdbe82d47
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/3cf5a5f3cc53_612a3ff26d072aefa15c6914f54c3d4c17c2e22a7e22eed6b22f77acdbe82d47.bin
   - url: https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax?code=SH601138
     fetched_at: '2026-08-18T04:44:02.950636Z'
     bytes: 35476
     sha256: 30d280669a2c5a7b5b3b85fec0ff97134053f050c301c808b756ef888a722552
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/f24023ee6e47_30d280669a2c5a7b5b3b85fec0ff97134053f050c301c808b756ef888a722552.bin
   - url: https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/zcfzbAjaxNew?companyType=4&reportDateType=0&reportType=1&dates=2025-12-31%2C2024-12-31%2C2023-12-31&code=SH601138
     fetched_at: '2026-08-18T04:44:03.017081Z'
     bytes: 40443
     sha256: 591c5c8d564a3bda2147f7b3c0c6f1c543cc3852bb7743240960bae3d48657fe
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/97e653a79b84_591c5c8d564a3bda2147f7b3c0c6f1c543cc3852bb7743240960bae3d48657fe.bin
   - url: https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/lrbAjaxNew?companyType=4&reportDateType=0&reportType=1&dates=2025-12-31%2C2024-12-31%2C2023-12-31&code=SH601138
     fetched_at: '2026-08-18T04:44:03.049634Z'
     bytes: 26385
     sha256: e08fea3815305e1481b0fed5a4549295d65ec4ba0473890757e3746bd6aae2cd
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/0ea25930fc1d_e08fea3815305e1481b0fed5a4549295d65ec4ba0473890757e3746bd6aae2cd.bin
   - url: https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/xjllbAjaxNew?companyType=4&reportDateType=0&reportType=1&dates=2025-12-31%2C2024-12-31%2C2023-12-31&code=SH601138
     fetched_at: '2026-08-18T04:44:03.061470Z'
     bytes: 33828
     sha256: 2448bbfdf291c3918275ad26f7bcfbb641cdd91258e1c098d9dd9961d7439351
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/b924e464ed69_2448bbfdf291c3918275ad26f7bcfbb641cdd91258e1c098d9dd9961d7439351.bin
   - url: https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/lrbAjaxNew?companyType=4&reportDateType=0&reportType=1&dates=2026-09-30%2C2026-06-30%2C2026-03-31%2C2025-09-30%2C2025-06-30%2C2025-03-31&code=SH601138
     fetched_at: '2026-08-18T04:44:03.080294Z'
     bytes: 43674
     sha256: 375d4127217b4ba527e3ccd87979c680f7b8c894d4979aab825e3d790d16357a
-    snapshot: /Users/cloveric/.cctb/ccfcc3/workspace/astock-dcf-model/data/raw/601138/20260818T044402.842025Z/bac30832986b_375d4127217b4ba527e3ccd87979c680f7b8c894d4979aab825e3d790d16357a.bin
   interim:
     source: eastmoney_interim
     status: ok

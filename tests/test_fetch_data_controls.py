@@ -85,7 +85,18 @@ def test_curl_get_can_persist_immutable_raw_snapshot(monkeypatch, tmp_path):
     fd.curl_get("https://example.test/public-data")
 
     item = fd.get_fetch_manifest()[0]
-    snapshot = Path(item["snapshot"])
-    assert snapshot.parent == tmp_path
+    assert not Path(item["snapshot"]).is_absolute()
+    assert item["snapshot_scope"] == "raw_dir"
+    assert item["snapshot_local_only"] is True
+    assert item["snapshot_committed"] is False
+    assert len(item["snapshot_root_id"]) == 12
+    snapshot = tmp_path / item["snapshot"]
     assert snapshot.read_bytes() == payload
     assert item["sha256"] in snapshot.name
+
+
+def test_missing_cashflow_da_stays_missing_instead_of_becoming_zero():
+    """Unavailable D&A source fields must remain unknown, not a fabricated zero."""
+    row = {"FA_IR_DEPR": None, "IA_AMORTIZE": None, "LPE_AMORTIZE": None}
+    assert fd._cashflow_da(row) is None
+    assert fd._cashflow_da({**row, "FA_IR_DEPR": 12_500_000}) == 12_500_000

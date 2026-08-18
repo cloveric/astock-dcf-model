@@ -46,6 +46,14 @@ def test_as_of_rejects_look_ahead_configuration(tmp_path):
         )
 
 
+def test_as_of_requires_canonical_calendar_date(tmp_path):
+    path = _write_config(tmp_path)
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        bm.load_config(
+            config_path=str(path), allow_fallback=False, as_of="20260818",
+        )
+
+
 def test_require_interim_distinguishes_missing_or_failed_anchor(tmp_path):
     missing = _write_config(tmp_path)
     with pytest.raises(ValueError, match="require-interim"):

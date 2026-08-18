@@ -18,6 +18,7 @@
   "valuation_date": "2026-08-14",
   "research_sheets": [],
   "config_path": "configs/300476.yaml",
+  "config_path_scope": "project",
   "config_sha256": "590d14283ce2f28665b2b0bf356054b4332a23da2dd624f6a00cc2ec8c7baea0",
   "is_default_config": true,
   "currency_code": "CNY",
@@ -35,23 +36,23 @@
     "assets": 35244.6,
     "ratio": 2.8373140851597344e-06
    }
-    ],
-    "scenario_engine": "simplified_same_engine_v1",
-    "consensus_rev_verified": true,
-    "consensus_np_verified": true,
-    "consensus_verified_by_year": {
-      "rev": {
-        "2026": true,
-        "2027": true,
-        "2028": true
-      },
-      "np": {
-        "2026": true,
-        "2027": true,
-        "2028": true
-      }
-    },
-    "fcfe_divergence_waiver": "",
+  ],
+  "scenario_engine": "simplified_same_engine_v1",
+  "consensus_rev_verified": true,
+  "consensus_np_verified": true,
+  "consensus_verified_by_year": {
+   "rev": {
+    "2026": true,
+    "2027": true,
+    "2028": true
+   },
+   "np": {
+    "2026": true,
+    "2027": true,
+    "2028": true
+   }
+  },
+  "fcfe_divergence_waiver": "",
   "interim_status": ""
  },
  "dcf_ps": "DCF!D26",
@@ -115,12 +116,13 @@
  },
  "rel_lo": "Relative_Val!C17",
  "rel_hi": "Relative_Val!C18",
- "rel_med_pe": "Relative_Val!$F$10",
- "relative_price_rows": [
-  "Relative_Val!F5",
-  "Relative_Val!F6"
- ],
+ "rel_med_pe": "Relative_Val!$C$14",
+ "relative_price_rows": [],
  "rel_median_cell": "Relative_Val!$F$10",
+ "relative_f1_rows": [],
+ "rel_f1_median_cell": "Relative_Val!$H$10",
+ "relative_peg_rows": [],
+ "rel_peg_median_cell": "Relative_Val!$J$10",
  "sens_center": "Sensitivity!E8",
  "wacc_calc": "Assumptions!C89",
  "wacc_used": "Assumptions!C91",

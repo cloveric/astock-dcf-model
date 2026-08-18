@@ -100,6 +100,30 @@ def test_default_golden_rejects_addr_fingerprint_that_disagrees_with_source_file
     assert result["status"] == "FAIL"
 
 
+def test_default_golden_resolves_project_relative_config_path(tmp_path, monkeypatch):
+    cfg = tmp_path / "configs" / "999999.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text("actual: changed\n", encoding="utf-8")
+    frozen_hash = hashlib.sha256(b"actual: frozen\n").hexdigest()
+    monkeypatch.setitem(vm.GOLDEN_DCF_PS, "999999", {
+        "value": 12.5,
+        "config_sha256": frozen_hash,
+    })
+
+    result = _control("_golden_control")(
+        "999999",
+        12.5,
+        {
+            "config_path": "configs/999999.yaml",
+            "config_path_scope": "project",
+            "config_sha256": frozen_hash,
+            "is_default_config": True,
+        },
+        repo_root=str(tmp_path),
+    )
+    assert result["status"] == "FAIL"
+
+
 @pytest.mark.parametrize(
     ("wacc", "terminal_g", "want"),
     [
@@ -127,6 +151,14 @@ def test_relative_median_must_equal_median_of_pricing_rows():
     assert control(30.0, [10.0, 20.0, 30.0])["status"] == "FAIL"
     assert control(None, [10.0, 20.0, 30.0])["status"] == "FAIL"
     assert control(None, [])["status"] == "NOT_APPLICABLE"
+
+
+def test_fy2_median_control_rejects_formula_errors_with_distinct_name():
+    result = _control("_relative_median_control")(
+        "#DIV/0!", [12.0, 18.0], name="相对估值FY2中位数",
+    )
+    assert result["name"] == "相对估值FY2中位数"
+    assert result["status"] == "FAIL"
 
 
 def test_relative_display_uses_true_median_only_when_pricing_rows_exist():
@@ -213,3 +245,10 @@ def test_verification_payload_is_stable_for_web_consumers():
         "label": "ALL PASS",
         "controls": controls,
     }
+
+
+def test_verification_payload_does_not_publish_absolute_workbook_path():
+    payload = _control("_verification_payload")(
+        "/Users/alice/private/model.xlsx", {"code": "300476"}, [],
+    )
+    assert payload["file"] == "model.xlsx"
