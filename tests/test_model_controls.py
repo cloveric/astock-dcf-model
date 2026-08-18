@@ -98,7 +98,12 @@ def test_usd_model_uses_usd_per_share_labels_everywhere(tmp_path):
 
 
 def test_auto_consensus_is_labeled_and_excluded_from_summary_envelope(tmp_path):
-    wb, addr = _build(tmp_path, _raw("688825"), "auto_consensus")
+    # 0.6.1: 仓库配置的六家可比已升级为已验证FY1一致预期, 会合法进入正式计价;
+    # 本测试守卫的是"未验证可比不得进正式计价", 故显式将其降级为未验证再断言
+    raw = _raw("688825")
+    for cp in raw.get("relative_val", {}).get("comps", []):
+        cp["earnings_verified"] = False
+    wb, addr = _build(tmp_path, raw, "auto_consensus")
 
     assumptions = wb["Assumptions"]
     labels = [assumptions.cell(row, 1).value for row in range(1, assumptions.max_row + 1)]
@@ -117,6 +122,14 @@ def test_auto_consensus_is_labeled_and_excluded_from_summary_envelope(tmp_path):
     assert f"D{auto_row}" not in high_formula
     assert addr["relative_price_rows"] == []
     assert addr["rel_med_pe"] != addr["rel_median_cell"]
+
+
+
+def test_verified_fy1_comps_enter_formal_pricing(tmp_path):
+    """0.6.1: earnings_verified=true + earnings_basis=FY1 的可比应进入正式计价集合"""
+    wb, addr = _build(tmp_path, _raw("688825"), "verified_fy1")
+    assert len(addr["relative_price_rows"]) == 6
+    assert addr["rel_med_pe"] == addr["rel_median_cell"]
 
 
 def test_partial_external_consensus_only_verifies_explicit_series_and_year(tmp_path):
