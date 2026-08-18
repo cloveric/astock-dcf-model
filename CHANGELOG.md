@@ -2,6 +2,13 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 研究层
+
+- `--llm` 可不带值，等同 `--llm auto`；自动路由固定为 **Codex → Claude → Kimi**，CLI 缺失、异常、超时、非零退出或空输出时继续回退。显式 provider 仍只调用指定 CLI；模型和 effort 沿用对应 CLI 的本机默认配置。
+- Web 表单/API 增加 Kimi provider；Web LLM 仍默认禁用，必须显式设置 `WEB_ALLOW_LLM=1`。
+
 ## [0.6.2] - 2026-08-18
 
 对 0.6.1 的可比公司与自动取数结果做二次审计，修复“字段写着已验证、数字却未真正对账”的语义漏洞。

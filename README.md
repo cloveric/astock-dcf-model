@@ -9,11 +9,12 @@
 [![Version](https://img.shields.io/badge/version-0.6.2-1f6feb.svg)](./CHANGELOG.md)
 [![CI](https://github.com/cloveric/astock-dcf-model/actions/workflows/ci.yml/badge.svg)](https://github.com/cloveric/astock-dcf-model/actions)
 [![Checks](https://img.shields.io/badge/checks-12%2F12%20gating-brightgreen.svg)](#-验证记录)
-[![Tests](https://img.shields.io/badge/tests-121%20passed-brightgreen.svg)](#-验证记录)
+[![Tests](https://img.shields.io/badge/tests-124%20passed-brightgreen.svg)](#-验证记录)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 [快速上手](#-快速上手) ·
+[生成流程](#-一个模型如何生成) ·
 [它长什么样](#-它长什么样) ·
 [为什么](#-为什么不用手工坊-excel) ·
 [架构](#-架构) ·
@@ -43,6 +44,35 @@ python fetch_data.py --code 002463       # 换标的: 拉数生成 configs/00246
 产物写入 `out/`:`<代码>_<名称>_估值模型.xlsx`(全公式,Excel/WPS/LibreOffice 均可重算)+ 同名 `.addr.json`(单元格地址索引,供验收与二次开发)。`examples/` 收录 **胜宏科技 / 沪电股份 / 中芯国际** 三个成稿与验收日志,可直接下载体验。
 
 精度最高的用法:复制 `configs/300476.yaml` 手工改写——**配置即研究底稿**,每条假设写清依据与日期。
+
+## 🧭 一个模型如何生成
+
+```mermaid
+flowchart LR
+    A["① 输入<br/>股票代码 / YAML"] --> B["② 读取数据<br/>精配置或公开数据兜底"]
+    B --> C["③ 严格校验<br/>结构 · 经济边界 · 反假配平"]
+    C --> D["④ 可选研究层<br/>DR · 共识 · 公告 · LLM"]
+    D --> E["⑤ 模型引擎<br/>三表 · FIN · DCF · FCFE"]
+    E --> F["⑥ 生成产物<br/>17+2 Sheets · addr.json"]
+    F --> G["⑦ 独立重算<br/>LibreOffice headless"]
+    G --> H["⑧ 机器裁决<br/>PASS / REVIEW / FAIL"]
+```
+
+| 核心问题 | 当前规则 |
+|---|---|
+| **谁生成模型？** | Python + OpenPyXL 写入结构、输入与公式；OpenPyXL 不计算公式。 |
+| **数据从哪里来？** | 有完整 YAML 时直接读取、不联网；缺配置或显式刷新时，由系统 `curl` 访问腾讯行情、东财 F10/HKF10，并记录来源血缘。 |
+| **谁计算并验收？** | LibreOffice 在独立 profile 中真实重算；`verify_model.py` 再读取结果，联合检查黄金值、三表、融资、WACC-g、情景、相对估值及 FCFE 分歧。 |
+| **AI 是否参与数值建模？** | 默认不参与。`--llm` 只生成不超过 250 字的研究备忘录，不修改假设、公式或估值结果。 |
+| **`--llm` 用哪个模型？** | 裸 `--llm` 等于 `auto`，按 **Codex → Claude → Kimi** 回退，首个成功即停止；型号和 effort 沿用对应 CLI 的本机默认配置。 |
+| **用了 MCP / 插件 / Skill 吗？** | 核心建模链没有这些运行依赖。可选 LLM 是外部 CLI 子进程，可能继承该 CLI 的个人配置，但项目自身不配置或调用 MCP、插件、Skill。 |
+
+```bash
+python build_model.py --code 300476          # 默认：纯确定性建模，不调用 LLM
+python build_model.py --code 300476 --llm    # 可选：Codex → Claude → Kimi 生成研究备忘录
+```
+
+这是 1 分钟总览；下方[架构图](#-架构)、[验证记录](#-验证记录)与[工作表清单](#-工作表清单-17--2)继续展开实现细节和可复现证据。
 
 ## 📸 它长什么样
 
@@ -87,7 +117,7 @@ flowchart TB
     subgraph L3["研究层(默认全关, 优雅降级)"]
         DR["--dr 深度研究档案<br/>量化结论回填依据列"]
         AN["--announcements<br/>业绩预告要点"]
-        LLM["--llm<br/>本机 CLI 研究备忘录"]
+        LLM["--llm<br/>Codex → Claude → Kimi<br/>研究备忘录"]
     end
     BM["build_model.py<br/>openpyxl 全公式生成 17+2 张工作表 + 15 个 named ranges + addr.json"]
     VM["verify_model.py<br/>LibreOffice headless 重算 → 结构化语义控制 → JSON verdict/退出码 + 黄金值断言"]
@@ -131,7 +161,7 @@ flowchart TB
 
 FCFE/FCFF 差异达到 30% 会使验证器返回 `REVIEW`（退出码 2）。`00981` 与 `688825` 的配置分别记录了动态杠杆与一次性去杠杆的复核理由，所以显示 `WAIVED`；这不是把两种方法机械配成一致，原始差异仍完整显示。
 
-同一配置双构建的公式/输入签名一致；全套 **121 tests** 已在本轮本地验证通过。CI 已配置为持续执行 Python 语法检查、Ruff、五配置构建/冒烟/LibreOffice 重算/结构化验收。
+同一配置双构建的公式/输入签名一致；全套 **124 tests** 已在本轮本地验证通过。CI 已配置为持续执行 Python 语法检查、Ruff、五配置构建/冒烟/LibreOffice 重算/结构化验收。
 
 </details>
 
@@ -222,13 +252,13 @@ python build_model.py --code 300476 \
     --dr examples/research/dr_300476.md \                   # 深度研究档案: 量化结论按关键词回填依据列
     --consensus examples/research/consensus_300476.json \   # 聚源/gildata 一致预期(含目标价)
     --announcements \                                       # 东财业绩预告/快报最新一期要点
-    --llm auto                                              # 本机 claude/codex CLI 生成研究备忘录
+    --llm                                                   # 本机 CLI: Codex → Claude → Kimi 回退
 ```
 
 - `--dr <档案.md>`:章节化解析研究档案,提取含数字与单位的量化结论,按关键词(自 config 分部名动态派生)回填到 Assumptions 依据列(标注 `dr档案§章节号`,只追加不改值);工作簿新增 **DR研究** 与 **研究摘要** 两页。
 - `--consensus <json/csv>`:一致预期文件覆盖配置 `consensus` 段,按年份对齐合并,溯源如实标注(文件覆盖年/沿用原配置年/平推年分别注明);并在 Relative_Val 与 Checks 各加一行目标价一致性对照。工具不直连付费源,格式见 `examples/research/consensus_300476.json`。
 - `--announcements`:东财数据中心业绩预告/业绩快报(系统 curl),最新一期要点进研究摘要。
-- `--llm auto|claude|codex|off`:本机存在对应 CLI 时生成一段研究备忘录写入研究摘要页眉;CLI 报错或输出为空时安全降级,默认 `off`。
+- `--llm [auto|codex|claude|kimi|off]`:不传时默认 `off`;裸 `--llm` 等同 `--llm auto`,按 **Codex → Claude → Kimi** 依次尝试,遇到 CLI 缺失、异常、超时、非零退出或空输出才回退。显式指定 provider 时只调用该 CLI。模型型号与 reasoning / effort 沿用各 CLI 自己的本机默认配置,项目不另设第二套默认值。
 
 ## 🖥 Web 模式
 

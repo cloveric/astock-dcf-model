@@ -244,6 +244,17 @@ def test_web_llm_requires_explicit_opt_in(web_server):
     assert web_server._jobs == {}
 
 
+def test_web_recognizes_kimi_but_still_requires_explicit_opt_in(web_server):
+    response = _request(
+        web_server.app, 'POST', '/api/jobs',
+        json_body={'code': '300476', 'llm': 'kimi'},
+    )
+
+    assert response.status_code == 403
+    assert response.json()['detail'].startswith('Web LLM 已禁用')
+    assert web_server._jobs == {}
+
+
 def test_oversized_request_body_is_rejected_before_json_parsing(web_server, monkeypatch):
     monkeypatch.setattr(web_server, 'MAX_REQUEST_BYTES', 1024)
     body = json.dumps({'code': '300476', 'unused': 'x' * 2048}).encode('utf-8')

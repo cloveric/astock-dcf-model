@@ -62,7 +62,7 @@ from fetch_data import em_code, is_hk  # noqa: E402  (代码语义校验复用�
 _REPO_REAL = os.path.realpath(REPO_ROOT)
 
 CODE_RE = re.compile(r'^\d{5,6}$')          # 6位A股 或 5位港股
-VALID_LLM = {'off', 'auto', 'claude', 'codex'}
+VALID_LLM = {'off', 'auto', 'codex', 'claude', 'kimi'}
 
 
 def _positive_env_int(name, default):

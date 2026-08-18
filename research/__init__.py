@@ -7,7 +7,7 @@
   2. --consensus <file>  聚源/gildata一致预期(json/csv): 覆盖consensus段并写入研究摘要,
                          Relative_Val/Checks各加一行一致性对照
   3. --announcements     东财业绩预告/业绩快报(系统curl, python不直连东财)最新一期要点
-  4. --llm auto|claude|codex|off  本机存在对应CLI时生成研究备忘录写入研究摘要页眉
+  4. --llm [auto|codex|claude|kimi|off]  本机CLI生成研究备忘录; auto按Codex→Claude→Kimi回退
 任何来源不可用时优雅降级(记note, 不报错中断建模)。
 """
 from . import announcements as _ann_mod

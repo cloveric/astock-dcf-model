@@ -2780,7 +2780,7 @@ def build(cfg, out_path, addr_path, research=None):
     return addr
 
 
-def main():
+def _argument_parser():
     ap = argparse.ArgumentParser(description='A股机构级估值模型生成器 (DCF+FCFE+三表+FIN调度, 17 sheets)')
     ap.add_argument('--code', help='A股代码, 如 300476; 读取 configs/<code>.yaml')
     ap.add_argument('--config', help='直接指定YAML配置路径')
@@ -2790,8 +2790,9 @@ def main():
     ap.add_argument('--consensus', help='研究层: 聚源/gildata一致预期文件(json/csv, 含目标价)')
     ap.add_argument('--announcements', action='store_true',
                     help='研究层: 东财业绩预告/快报(系统curl)最新一期要点进研究摘要')
-    ap.add_argument('--llm', default='off', choices=['auto', 'claude', 'codex', 'off'],
-                    help='研究层: 本机LLM CLI生成研究备忘录 (默认off)')
+    ap.add_argument('--llm', nargs='?', const='auto', default='off',
+                    choices=['auto', 'codex', 'claude', 'kimi', 'off'],
+                    help='研究层: 本机LLM CLI生成研究备忘录; 裸--llm等于auto, 默认off')
     ap.add_argument('--refresh', action='store_true',
                     help='忽略已存配置，在内存中重新抓取并构建公开数据兜底模型(手工假设不会沿用)')
     ap.add_argument('--as-of', help='数据截止日 YYYY-MM-DD；拒绝估值日晚于该日的前视配置')
@@ -2800,6 +2801,11 @@ def main():
     ap.add_argument('--fail-on-stale', action='store_true', help='把配置过期告警升级为硬失败')
     ap.add_argument('--require-interim', action='store_true',
                     help='要求存在成功且启用的最新季报/中报锚点，否则硬失败')
+    return ap
+
+
+def main():
+    ap = _argument_parser()
     args = ap.parse_args()
     if not args.code and not args.config:
         ap.error('需提供 --code 或 --config')
