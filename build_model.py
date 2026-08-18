@@ -2183,7 +2183,44 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 1, f'信息项: {F1}E现金 vs 最低现金', 't')
     put(ws, r, 2, f"={BSs}!{YC[F1]}{B['cash']}", 'f', NUM)
     put(ws, r, 3, f"={FINs}!{YC[F1]}{F['mincash']}", 'f', NUM)
-    put(ws, r, NOTE_COL, '两者应相等(sweep后现金=最低现金, 溢出去理财)', 'g', size=9); r += 2
+    put(ws, r, NOTE_COL, '两者应相等(sweep后现金=最低现金, 溢出去理财)', 'g', size=9); r += 1
+    # X1: 中报锚点信息行 — 仅cfg含interim段且报告期年份==首预测年F0且rev/months可年化时生成;
+    #     追加在既有信息行之后、不加入CHK_SUM, 故不影响布尔闸门与汇总单元格(其行号按r变量顺延);
+    #     无interim段(存量配置)时本块零输出, 工作簿与既有版本逐单元格等价
+    _itm = cfg.raw.get('interim') or {}
+
+    def _itm_num(v):
+        # interim字段规整为float标量; None/缺失/非数值→None (字段允许 {value,basis} 包装)
+        if isinstance(v, dict):
+            v = _norm_entry(v)['values']
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    _itm_lab = str(_itm.get('label') or '最新报告期')
+    _itm_rev, _itm_np = _itm_num(_itm.get('rev')), _itm_num(_itm.get('np_p'))
+    _itm_rev_pr = _itm_num(_itm.get('rev_prior'))
+    _itm_basis = str(_itm.get('basis') or '')
+    _itm_yr = None   # 报告期年份: 优先label前4位(如'2026Q1'), 兜底date前4位
+    for _s in (_itm.get('label'), _itm.get('date')):
+        _s = str(_s or '')
+        if len(_s) >= 4 and _s[:4].isdigit():
+            _itm_yr = int(_s[:4]); break
+    _itm_mo = _itm.get('months')
+    _itm_mo = int(_itm_mo) if isinstance(_itm_mo, (int, float)) and not isinstance(_itm_mo, bool) and int(_itm_mo) in (3, 6, 9) else None
+    ITM_RATIO_CELL = None
+    if _itm and _itm_yr == F0 and _itm_rev and _itm_mo:
+        _itm_ann = _itm_rev * 12.0 / _itm_mo
+        put(ws, r, 1, f'信息项: 首年营收预测 / {_itm_lab}年化', 't')
+        put(ws, r, 2, f"={ISs}!{YC[F0]}{I['rev']}/{_itm_ann:.10g}", 'f', PCT, align='center')
+        put(ws, r, NOTE_COL,
+            f'信息行, 不参与布尔汇总; 除数为硬数, 口径: {_itm_lab}营收{_itm_rev:,.1f}×12/{_itm_mo}={_itm_ann:,.1f}百万; {_itm_basis}',
+            'g', size=9)
+        ITM_RATIO_CELL = f'B{r}'; r += 1
+        put(ws, r, 1, '信息项: 偏离提示', 't')
+        put(ws, r, 2,
+            f"=IF(AND({ITM_RATIO_CELL}>=0.7,{ITM_RATIO_CELL}<=1.3),\"±30%内\",\"偏离超±30%, 请核对首年假设\")",
+            'f', align='center')
+        put(ws, r, NOTE_COL, f'上行比值0.7~1.3之外提示复核首年假设; {_itm_basis}', 'g', size=9); r += 1
+    r += 1
 
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
     put(ws, r, 1, '汇总: 全部通过 = ', 't', bold=True, size=14, align='right')
@@ -2277,6 +2314,22 @@ def build(cfg, out_path, addr_path, research=None):
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
         put(ws, r, 2, n, 'g', size=10, wrap=True)
         ws.row_dimensions[r].height = 40 if len(n) > 80 else 26
+        r += 1
+    # X2: 中报注记 — 仅cfg含interim段时在建模注记区末追加一行(样式与上方注记行一致);
+    #     数字取自interim字段(百万→亿), prior缺失省略同比; anchor非true改写"未参与校准仅供对照"
+    if _itm:
+        _p = []
+        if _itm_rev is not None:
+            _p.append(f'营收 {_itm_rev / 100:.1f} 亿')
+        if _itm_np is not None:
+            _p.append(f'归母 {_itm_np / 100:.1f} 亿')
+        _itm_note = f'最新报告期 {_itm_lab}: ' + ' / '.join(_p)
+        if _itm_rev is not None and _itm_rev_pr:
+            _itm_note += f'(同比: 营收 {_itm_rev / _itm_rev_pr - 1:+.1%})'
+        _itm_note += ', 兜底预测已按其年化校准' if _itm.get('anchor') is True else ', 未参与校准仅供对照'
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
+        put(ws, r, 2, _itm_note, 'g', size=10, wrap=True)
+        ws.row_dimensions[r].height = 40 if len(_itm_note) > 80 else 26
         r += 1
     r += 1
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
@@ -2412,6 +2465,9 @@ def build(cfg, out_path, addr_path, research=None):
         'fin_iter_resid_rows': [IT[k]['resid'] for k in sorted(IT)],
         'cf_cash1_row': C['cash1'],
     }
+    # X3: 可选键 — 仅interim信息行生成时写入(指向首年预测/中报年化比值单元格, 供人工查阅, verify不依赖)
+    if ITM_RATIO_CELL:
+        addr['chk_interim_ratio'] = f"Checks!{ITM_RATIO_CELL}"
     with open(addr_path, 'w', encoding='utf-8') as f:
         json.dump(addr, f, ensure_ascii=False, indent=1)
     print('ADDR', addr_path)
