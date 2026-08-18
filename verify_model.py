@@ -30,7 +30,7 @@ from openpyxl.utils import get_column_letter
 GOLDEN_DCF_PS = {
     '300476': {
         'value': 340.415208186145,
-        'config_sha256': '57b10d0620e96fdc42fe2d1452404db344b01cca5d1b64662712c22a31a27e2e',
+        'config_sha256': '590d14283ce2f28665b2b0bf356054b4332a23da2dd624f6a00cc2ec8c7baea0',
     },
 }
 

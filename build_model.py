@@ -1686,6 +1686,7 @@ def build(cfg, out_path, addr_path, research=None):
     r = RV_COMP_START
     COMP_ROWS = []
     BETA_ROWS = []
+    PRICE_ROWS = []
     for cp in comps:
         put(ws, r, 1, cp['name'], 't')
         put(ws, r, 2, cp['code'], 'g', align='center')
@@ -1707,17 +1708,32 @@ def build(cfg, out_path, addr_path, research=None):
         else:
             for cc in (12, 13, 14, 15):
                 put(ws, r, cc, '—', 'g', align='center')
+        if not cp.get('ref_only'):
+            PRICE_ROWS.append(r)
         COMP_ROWS.append(r)
         r += 1
     assert r == RV_MED_ROW, f'RV median row mismatch: {r} != {RV_MED_ROW}'
-    put(ws, r, 1, f'可比中位数(A股{N_BETA}家)', 't', bold=True)
+    # 0.5.1: PE中位与β中位解耦 —— PE中位统计全部计价可比(非ref_only),
+    # β中位仍只统计带beta_l的可比; 两集合相同时保持旧版label/公式逐字节不变
+    _price_same = (PRICE_ROWS == BETA_ROWS)
+    def _med(colL, rows):
+        if rows == list(range(rows[0], rows[-1] + 1)):
+            return f"=MEDIAN({colL}{rows[0]}:{colL}{rows[-1]})"
+        return "=MEDIAN(" + ",".join(f"{colL}{x}" for x in rows) + ")"
+    if _price_same or not PRICE_ROWS:
+        put(ws, r, 1, f'可比中位数(A股{N_BETA}家)', 't', bold=True)
+    else:
+        put(ws, r, 1, f'可比中位数(计价{len(PRICE_ROWS)}家/β{N_BETA}家)', 't', bold=True)
+    if PRICE_ROWS:
+        put(ws, r, 6, _med('F', PRICE_ROWS), 'f', MULT, bold=True)
+        put(ws, r, 8, _med('H', PRICE_ROWS), 'f', MULT, bold=True)
+        put(ws, r, 10, _med('J', PRICE_ROWS), 'f', '0.00', bold=True)
     if N_BETA:
         _b0, _b1 = BETA_ROWS[0], BETA_ROWS[-1]
-        put(ws, r, 6, f"=MEDIAN(F{_b0}:F{_b1})", 'f', MULT, bold=True)
-        put(ws, r, 8, f"=MEDIAN(H{_b0}:H{_b1})", 'f', MULT, bold=True)
-        put(ws, r, 10, f"=MEDIAN(J{_b0}:J{_b1})", 'f', '0.00', bold=True)
         c = put(ws, r, 15, f"=MEDIAN(O{_b0}:O{_b1})", 'f', '0.000', bold=True, fill=CHK_FILL)
         put(ws, r, 11, 'βu中位数→Assumptions WACC区relever; βl/D/E为分析师输入(参考行情终端β与各公司最新年报杠杆), 可按终端数据更新', 'g', size=9, wrap=True)
+    elif PRICE_ROWS:
+        put(ws, r, 11, '计价可比PE中位→目标PE上限; 无beta_l可比, βu走Assumptions蓝色输入(不影响折现率)', 'g', size=9, wrap=True)
     else:
         put(ws, r, 11, '无可比公司配置(兜底模式): βu走Assumptions蓝色输入, 相对估值上下限=目标PE下限', 'g', size=9, wrap=True)
     MED_ROW = r
@@ -1745,9 +1761,12 @@ def build(cfg, out_path, addr_path, research=None):
     put(ws, r, 11, _pe_lo_e['basis'], 'g', size=9)
     PE_LO = r; r += 1
     put(ws, r, 1, '目标PE上限', 't')
-    if N_BETA:
+    if PRICE_ROWS and _price_same:
         put(ws, r, 3, f"=F{MED_ROW}", 'f', MULT)
         put(ws, r, 11, f'=A股可比{F0}E PE中位数(公式)', 'g', size=9)
+    elif PRICE_ROWS:
+        put(ws, r, 3, f"=F{MED_ROW}", 'f', MULT)
+        put(ws, r, 11, f'=计价可比{F0}E PE中位数(公式, 含海外; ref_only标记的仅参照行不参与)', 'g', size=9)
     else:
         put(ws, r, 3, f"=C{PE_LO}", 'f', MULT)
         put(ws, r, 11, '=目标PE下限(无可比公司配置, 兜底)', 'g', size=9)

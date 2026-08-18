@@ -189,7 +189,7 @@ relative_val:
     - {name: "深南电路", code: "002916.SZ", mcap: 2574.81, pe_ttm: 70.84, np_f0: 47.01, np_f1: 61.89, src: "同上", beta_l: 1.25, d_e: 0.30, tax: 0.15}
     - {name: "生益电子", code: "688183.SH", mcap: 971.52, pe_ttm: 47.31, np_f0: 18.00, np_f1: 23.00, src: "2026E/2027E归母为估算(2026Q1归母4.45亿+122%年化外推), 绿色待核", beta_l: 1.35, d_e: 0.45, tax: 0.15}
     - {name: "广合科技", code: "001389.SZ", mcap: 801.05, pe_ttm: 54.13, np_f0: 13.00, np_f1: 17.00, src: "2026E/2027E归母为估算(服务器PCB高增), 绿色待核", beta_l: 1.20, d_e: 0.20, tax: 0.15}
-    - {name: "TTM Technologies", code: "TTMI US", mcap: 320.00, pe_ttm: 22.00, np_f0: 18.00, np_f1: 21.00, src: "美股, 约值(市值≈$4.4B, PE-TTM≈22x), 仅作国际参照, 不进beta中位数"}
+    - {name: "TTM Technologies", code: "TTMI US", mcap: 320.00, pe_ttm: 22.00, np_f0: 18.00, np_f1: 21.00, ref_only: true, src: "美股, 约值(市值≈$4.4B, PE-TTM≈22x), 仅作国际参照(ref_only), 不进beta与PE中位数"}
 
 sensitivity:
   pe_list: [25, 30, 35, 40, 45, 50]
