@@ -473,6 +473,18 @@ relative_val:
     value: 25.0
     basis: '兜底默认: 25x(无可比清单); 建议补comps后取可比中位数为上界'
   comps: []
+interim:
+  label: 2026Q1
+  date: '2026-03-31'
+  months: 3
+  rev: 2505.5
+  np_p: 197.4
+  np: 230.9
+  cost: 2001.9
+  rev_prior: 2247.2
+  np_p_prior: 188.0
+  anchor: false
+  basis: '东财HKF10收益表中期行(2026-03-31, 美元百万, 2026-08-18取数); anchor=false: 分部增速为手工研究口径不参与自动校准, 本段仅供Cover/Checks对照展示(Q1年化10,022 vs 模型2026E 10,833, 比值0.93在±30%内)'
 cover:
   subtitle: 中芯国际 | 港股自动兜底建模(东财HKF10+腾讯行情; 财报币种美元)
 data_lineage:
